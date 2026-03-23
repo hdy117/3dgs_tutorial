@@ -8,26 +8,25 @@
 
 ## 一、实践路线图总览
 
-```mermaid
-gantt
-    title 3DGS实现时间线（3周）
-    dateFormat  YYYY-MM-DD
-    section Week 1: 基础框架
-    环境配置       :2024-03-23, 2d
-    数据加载       :2024-03-25, 2d
-    投影渲染（慢速） :2024-03-27, 2d
-    训练循环（无densify） :2024-03-29, 2d
-    验证出图       :2024-03-31, 1d
-    
-    section Week 2: 完整流程
-    密度控制       :2024-04-01, 2d
-    Tile优化       :2024-04-03, 2d
-    完整训练       :2024-04-05, 1d
-    评估调参       :2024-04-06, 2d
-    
-    section Week 3: 优化扩展
-    CUDA kernel   :2024-04-08, 3d
-    部署测试       :2024-04-11, 2d
+```
+时间线 (3周计划)
+
+Week 1: 基础框架
+  Day 1-2: 环境配置 + 数据加载
+  Day 3-4: 投影渲染（慢速版，先跑通）
+  Day 5-6: 训练循环 + 损失函数（无密度控制）
+  Day 7:   验证能出图（哪怕质量差）
+
+Week 2: 完整流程
+  Day 1-2: 密度控制（densify/prune）
+  Day 3-4: Tile优化（速度提升到可接受）
+  Day 5:   完整训练（30k步） + 评估
+  Day 6-7: 调试优化 + 尝试不同数据集
+
+Week 3（可选）:
+  - 多视角支持完善
+  - CUDA kernel优化
+  - 部署到移动端
 ```
 
 ---
@@ -61,7 +60,7 @@ pip install pycolmap
 
 ### 2.2 数据集准备
 
-**快速开始**：nerf_synthetic（100张图，适合调试）
+**快速开始**: nerf_synthetic（100张图，适合调试）
 
 ```bash
 wget https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/dataset/nerf_synthetic.zip
@@ -74,7 +73,7 @@ data/nerf_synthetic/chair/
 └── transforms.json
 ```
 
-**用自己的数据**：
+**用自己的数据**:
 ```bash
 # COLMAP SfM
 colmap feature_extractor --database_path db/ --image_path images/
@@ -428,7 +427,9 @@ def compute_bbox(mu_2d, Sigma_2d, scale=3.0):
 def assign_gaussians_to_tiles(bbox_min, bbox_max, tile_size=16, W=800, H=600):
     n_tiles_x = (W + tile_size - 1) // tile_size
     n_tiles_y = (H + tile_size - 1) // tile_size
-    tile_mapping = [[] for _ in range(n_tiles_x * n_tiles_y)]
+    n_tiles = n_tiles_x * n_tiles_y
+    
+    tile_mapping = [[] for _ in range(n_tiles)]
     
     for g_idx in range(len(bbox_min)):
         x0, y0 = bbox_min[g_idx]
@@ -561,27 +562,35 @@ for step in range(total_steps):
 
 ### 10.1 阶段性验证
 
-| 阶段 | 检查点 | 通过标准 |
-|------|--------|----------|
-| 数据加载 | `dataset[0]` | 返回合理tensor |
-| 初始化 | `gaussians.N` | 1k-50k |
-| 慢速渲染 | `render_slow()` | 不是全黑/全白 |
-| 训练100步 | loss下降 | loss从1.0→0.5 |
-| Densify | N增长 | 从10k→50k |
-| Tile优化 | 单帧<100ms | time.time()测量 |
-| 完整训练 | PSNR>25 | 测试集评估 |
+```
++----------+----------------+----------------------------------+
+| 阶段     | 检查点         | 通过标准                         |
++----------+----------------+----------------------------------+
+| 数据加载 | dataset[0]     | 返回合理tensor                   |
+| 初始化   | gaussians.N    | 1k-50k                          |
+| 慢速渲染 | render_slow()  | 不是全黑/全白                    |
+| 训练100步| loss下降       | loss从1.0→0.5                   |
+| Densify  | N增长          | 从10k→50k                       |
+| Tile优化 | 单帧<100ms     | time.time()测量                  |
+| 完整训练 | PSNR>25        | 测试集评估                       |
++----------+----------------+----------------------------------+
+```
 
 ---
 
 ### 10.2 常见问题速查
 
-| 症状 | 原因 | 检查 | 解决 |
-|------|------|------|------|
-| 全黑 | Σ太小 | `Sigma.diag().mean()` | scale_factor×5-10 |
-| 全白 | α太大 | `alpha.mean()` | α调至0.3 |
-| 梯度0 | 高斯"死" | `mu.grad.norm()` | 增大α初始值 |
-| 条纹 | Σ奇异 | `torch.det(Sigma)` | Σ正则化 |
-| 不收敛 | LR太高 | loss NaN | 所有LR÷10 |
+```
++--------+----------+------+----------+
+| 症状   | 原因     | 检查 | 解决     |
++--------+----------+------+----------+
+| 全黑   | Σ太小    | Sigma.diag().mean() | scale_factor×5-10 |
+| 全白   | α太大    | alpha.mean() | α调至0.3 |
+| 梯度0  | 高斯"死" | mu.grad.norm() | 增大α初始值 |
+| 条纹   | Σ奇异    | torch.det(Sigma) | Σ正则化 |
+| 不收敛 | LR太高   | loss NaN | 所有LR÷10 |
++--------+----------+------+----------+
+```
 
 ---
 
@@ -607,11 +616,11 @@ for step in range(total_steps):
 
 ## 十二、最后提醒
 
-- ✅ **先跑通，再优化**：慢速版能出图比优化但跑不通重要
-- ✅ **小数据开始**：nerf_synthetic/chair（100张图）
-- ✅ **可视化驱动**：每100步保存渲染图
-- ✅ **梯度监控**：确保 `mu.grad.norm() > 0`
-- ✅ **参考官方**：但先自己写
+- ✅ **先跑通，再优化**: 慢速版能出图比优化但跑不通重要
+- ✅ **小数据开始**: nerf_synthetic/chair（100张图）
+- ✅ **可视化驱动**: 每100步保存渲染图
+- ✅ **梯度监控**: 确保 `mu.grad.norm() > 0`
+- ✅ **参考官方**: 但先自己写
 
 ---
 
