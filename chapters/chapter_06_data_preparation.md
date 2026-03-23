@@ -6,497 +6,380 @@
 
 ---
 
-## 一、引言：从照片到可训练的高斯
+## 一、数据流程总览
 
-**完整流程**：
-```
-照片 + 相机位姿 → SfM → 点云 → 初始化高斯 → 训练
-```
-
-本章聚焦：**SfM输出如何转化为高斯参数**
-
----
-
-## 二、SfM（Structure from Motion）基础
-
-### 2.1 什么是SfM？
-
-从多张无序照片中恢复：
-- 相机位姿（外参 R, t，内参 K）
-- 稀疏3D点云（tracks）
-
-**典型工具**：
-- **COLMAP**（最常用，C++/Python，精度高）
-- OpenMVG
-- VisualSfM
-
-### 2.2 COLMAP输出格式
-
-```
-database.db          # SQLite数据库（可选）
-cameras.bin         # 相机模型 + 内参
-images.bin          # 图像列表 + 外参
-points3D.bin        # 3D点云 + 颜色 + tracks
-```
-
-**二进制格式**（推荐，更高效）：
-- COLMAP提供Python API读取：`pycolmap`
-- 或使用官方命令行工具转换：`colmap model_converter`
-
-**points3D.bin 结构**：
-```python
-Point3D {
-    id: int
-    xyz: (3,) float32
-    rgb: (3,) uint8
-    error: float  # 重投影误差
-    track: TrackElement[]  # 观测该点的所有图像
-}
-```
-
-**TrackElement**：
-```python
-TrackElement {
-    image_id: int
-    point2D_idx: int  # 指向images.bin中的关键点
-}
+```mermaid
+flowchart LR
+    A[多视角照片] --> B[SfM<br/>COLMAP]
+    B --> C[稀疏点云 + 相机位姿]
+    C --> D[初始化高斯]
+    D --> E[训练]
+    
+    subgraph B
+        B1[特征提取]
+        B2[匹配]
+        B3[Bundle Adjustment]
+    end
 ```
 
 ---
 
-### 2.3 快速数据准备流程
+## 二、SfM（Structure from Motion）详解
+
+### 2.1 SfM能输出什么？
+
+| 输出 | 格式 | 用途 |
+|------|------|------|
+| **相机内参** | K矩阵（fx,fy,cx,cy） | 投影计算 |
+| **相机外参** | R(旋转), t(平移) | 世界→相机变换 |
+| **稀疏点云** | (X,Y,Z,R,G,B,error,track) | 高斯初始化 |
+| **重投影误差** | 每点每视角误差 | 尺度估计 |
+
+---
+
+### 2.2 COLMAP工作流
+
+**命令行流程**：
 
 ```bash
-# 1. 用COLMAP进行SfM
-colmap feature_extractor --database_path db/ --image_path images/
-colmap exhaustive_matcher --database_path db/
-colmap mapper --database_path db/ --image_path images/ --output_path sparse/
+# 1. 特征提取
+colmap feature_extractor \
+  --database_path database.db \
+  --image_path images/
 
-# 2. 转换为文本格式（可选）
-colmap model_converter --input_path sparse/ --output_path sparse_txt/ --output_type TXT
+# 2. 特征匹配
+colmap exhaustive_matcher \
+  --database_path database.db
 
-# 3. 验证（可视化点云）
-colmap model_analyzer --path sparse/
+# 3. 稀疏重建（SfM）
+colmap mapper \
+  --database_path database.db \
+  --image_path images/ \
+  --output_path sparse/
+
+# 4. 验证
+colmap model_analyzer --path sparse/0/
+```
+
+**输出结构**：
+```
+sparse/0/
+├── cameras.bin    # 相机模型 + 内参
+├── images.bin     # 图像外参（四元数 + 平移）
+└── points3D.bin   # 3D点云 + RGB + tracks
+```
+
+---
+
+### 2.3 COLMAP二进制格式解析
+
+**使用pycolmap**（推荐）：
+```python
+import pycolmap
+
+recon = pycolmap.Reconstruction("sparse/0/")
+
+# 相机
+for cam_id, camera in recon.cameras.items():
+    print(f"Camera {cam_id}: model={camera.model}, "
+          f"params={camera.params}, width={camera.width}, height={camera.height}")
+
+# 图像
+for img_id, image in recon.images.items():
+    print(f"Image {image.name}: qvec={image.qvec}, tvec={image.tvec}")
+
+# 点云
+for pt_id, point in recon.points3D.items():
+    print(f"Point {pt_id}: xyz={point.xyz}, rgb={point.rgb}, error={point.error}")
+    print(f"  Track: {len(point.track)} observations")
 ```
 
 ---
 
 ## 三、从SfM点云初始化高斯
 
-### 3.1 逐点初始化
+### 3.1 初始化参数表
 
-对于每个SfM点 p = (X, Y, Z, R, G, B, error, track)：
-
-**高斯参数**：
-- 位置 μ = p.xyz（直接复制）
-- 颜色 c = (R/255, G/255, B/255)（归一化到0-1）
-- 协方差 Σ = ?（需要估计）
-- 不透明度 α = 1（初始全不透明，后续优化）
-
----
-
-### 3.2 协方差初始化策略
-
-**问题**：SfM点只有位置，没有"尺度"或"方向"
-
-#### 策略1：各向同性球（简单但效果差）
-
-```
-Σ = σ² * I，其中 σ = 0.01（初始很小）
-```
-
-**问题**：
-- 太小的σ会导致渲染时几乎看不见（投影后值接近0）
-- 需要快速densify来扩大，不稳定
+| 参数 | 来源 | 初始值 | 说明 |
+|------|------|--------|------|
+| μ | SfM点云xyz | 直接复制 | 位置 |
+| c | SfM点云RGB | RGB/255 | 颜色（归一化） |
+| Σ | 估计（见下） | scale²·I | 协方差（各向同性） |
+| α | 固定值 | 0.5 | 不透明度（半透明） |
 
 ---
 
-#### 策略2：从点云邻域估计
+### 3.2 尺度估计（关键步骤）
 
-**思路**：利用局部几何，对每个点找K近邻（如K=5），计算邻域点集的协方差矩阵
+**问题**：SfM点只有位置，没有尺度信息
 
-```python
-def estimate_scale_from_neighbors(p, all_points, K=5):
-    # 计算到所有点的距离
-    dists = np.linalg.norm(all_points - p.xyz, axis=1)
-    neighbor_ids = np.argsort(dists)[:K]
-    neighbors = all_points[neighbor_ids]
-    # 计算协方差
-    centered = neighbors - neighbors.mean(axis=0)
-    cov = (centered.T @ centered) / K
-    # 取平均方差作为尺度
-    scale = np.sqrt(cov.diagonal()).mean()
-    return scale
+**朴素方案**：设Σ = 0.01²·I
+- ❌ 太小 → 渲染几乎不可见
+
+**正确方案**：从**重投影误差**估计尺度
+
+**几何关系**：
+
+```mermaid
+graph LR
+    A[3D点P] --> B[投影到图像1]
+    A --> C[投影到图像2]
+    B --> D[观测像素p1]
+    C --> E[观测像素p2]
+    
+    D --> F[重投影误差<br/>‖p1 - proj(P)‖]
+    E --> F
+    
+    F --> G["误差大 → P的不确定性大<br/>→ Σ应该大"]
 ```
-
-**问题**：
-- SfM点云稀疏，近邻可能距离很远 → Σ过大
-- 边缘点近邻少 → 估计不准
-
----
-
-#### 策略3：从相机几何估计（3DGS论文方案）
-
-**核心洞察**：
-- 每个点被多视角观测
-- 每个视角下，该点在图像上的**像素不确定性**可以反推3D尺度
 
 **公式**：
-```python
-def estimate_scale_from_reprojection(p, cameras, images):
-    """
-    p: SfM点，包含 track（观测该点的所有图像）
-    cameras: 相机参数字典
-    images: 图像外参列表
-    """
-    reprojection_errors = []
-    for obs in p.track:
-        img = images[obs.image_id]
-        cam = cameras[img.camera_id]
-        # 用相机参数投影p.xyz到像素
-        R, t = img.R, img.t
-        K = cam.K
-        # 世界→相机
-        X_cam = R @ p.xyz + t
-        # 投影
-        proj = K @ X_cam
-        proj = proj[:2] / proj[2]
-        # 重投影误差
-        err = np.linalg.norm(proj - obs.pixel)
-        reprojection_errors.append(err)
-    # 取中位数（稳健估计）
-    scale = np.median(reprojection_errors) * 0.5  # 保守系数
-    return scale
+```
+对于点P，在视角j下的重投影误差:
+  e_j = ‖p_j - proj(P, camera_j)‖
+
+尺度估计: scale = median(e_j for all j)
+协方差: Σ = (scale · factor)² · I
 ```
 
 **为什么用中位数？**
 - 对抗离群点（某些视角误差大）
 - 稳健估计
 
-**尺度与协方差关系**：
-- 假设各向同性：Σ = scale² · I
-- 实际可稍大一点：Σ = (scale·1.5)² · I
+**factor选择**：
+- 保守：0.5（论文建议）
+- 激进：1.0-2.0（如果画面太暗）
 
 ---
 
-### 3.3 不透明度初始化
-
-**策略**：
-- 所有 α = 0.5（半透明）
-- 理由：给优化留空间（可增可减）
-- 如果初始α=1，优化时很难降下来；α=0则无法上升
-
----
-
-### 3.4 初始化伪代码
+### 3.3 初始化伪代码
 
 ```python
-def init_gaussians_from_sfm(sfm_points, cameras, images):
+def init_gaussians_from_sfm(points3d, cameras, images, scale_factor=0.5):
     """
-    sfm_points: list of Point3D（从points3D.bin加载）
-    cameras: dict{camera_id: Camera}
-    images: list of Image（从images.bin加载）
+    points3d: SfM点云列表
+    cameras: 相机参数字典
+    images: 图像外参列表
+    scale_factor: 保守系数（0.5-1.0）
     """
     gaussians = []
-    for p in sfm_points:
+    
+    for p in points3d:
         # 1. 位置和颜色
         mu = torch.tensor(p.xyz, dtype=torch.float32)
-        c = torch.tensor(p.rgb / 255.0, dtype=torch.float32)
-
-        # 2. 估计尺度（从重投影误差）
-        scale = estimate_scale_from_reprojection(p, cameras, images)
-        sigma = scale * 0.5  # 保守系数
-
+        color = torch.tensor(p.rgb / 255.0, dtype=torch.float32)
+        
+        # 2. 估计尺度
+        reproj_errors = []
+        for track in p.track:
+            img = images[track.image_id]
+            cam = cameras[img.camera_id]
+            
+            # 投影
+            R = qvec2rotmat(img.qvec)
+            T = img.tvec
+            K = build_K(cam)
+            X_cam = R @ p.xyz + T
+            proj = K @ X_cam
+            proj = proj[:2] / proj[2]
+            
+            err = np.linalg.norm(proj - track.pixel)
+            reproj_errors.append(err)
+        
+        scale = np.median(reproj_errors) * scale_factor
+        sigma = scale
+        
         # 3. 协方差（各向同性）
-        Sigma = torch.eye(3) * sigma**2
-
+        Sigma = torch.eye(3) * (sigma**2)
+        
         # 4. 不透明度
         alpha = torch.tensor([0.5])
-
-        gaussians.append(Gaussian(mu, Sigma, alpha, c))
-
-    return GaussiansList(gaussians)  # 或合并为张量
+        
+        gaussians.append(Gaussian(mu, Sigma, alpha, color))
+    
+    return GaussiansList(gaussians)
 ```
 
 ---
 
 ## 四、相机参数处理
 
-### 4.1 从COLMAP读取相机
+### 4.1 坐标系转换问题
 
-**使用pycolmap**（推荐）：
+**COLMAP坐标系**（通常）：
+- 右手系
+- Y轴向上
+- Z轴向前（相机光轴）
+
+**NeRF/3DGS坐标系**（常用）：
+- 右手系
+- Z轴向上
+- Y轴向下（图像坐标y向下）
+
+**转换矩阵**：
 ```python
-import pycolmap
-
-recon = pycolmap.Reconstruction("sparse/0")
-for camera_id, camera in recon.cameras.items():
-    print(f"Camera {camera_id}: model={camera.model}, "
-          f"params={camera.params}, width={camera.width}, height={camera.height}")
-
-for image_id, image in recon.images.items():
-    print(f"Image {image.name}: qvec={image.qvec}, tvec={image.tvec}, "
-          f"camera_id={image.camera_id}")
-```
-
-**相机模型**：
-- `PINHOLE`：最常用，4参数（fx, fy, cx, cy）
-- `SIMPLE_PINHOLE`：3参数（fx, cx, cy），fy=fx
-- `OPENCV`：8参数（含畸变）
-
-**内参矩阵K**：
-```python
-if camera.model == "PINHOLE":
-    fx, fy, cx, cy = camera.params
-    K = np.array([[fx, 0, cx],
-                  [0, fy, cy],
-                  [0,  0,  1]])
-```
-
----
-
-### 4.2 外参（R, t）从四元数转换
-
-**四元数 → 旋转矩阵**：
-```python
-def qvec2rotmat(qvec):
-    """qvec = (w, x, y, z)"""
-    w, x, y, z = qvec
-    R = np.array([
-        [1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z, 2*x*z + 2*w*y],
-        [2*x*y + 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z - 2*w*x],
-        [2*x*z - 2*w*y, 2*y*z + 2*w*x, 1 - 2*x*x - 2*y*y]
-    ])
-    return R
-```
-
-**平移**：
-- t = image.tvec（直接使用）
-
----
-
-### 4.3 坐标系转换
-
-**问题**：COLMAP坐标系 vs 渲染坐标系
-
-- COLMAP：通常Y轴向上，Z向前（右手系）
-- 3DGS/NeRF：Z轴向上，Y向下（图像坐标）
-
-**转换**（可能需要）：
-```python
-# COLMAP → NeRF坐标系
+# COLMAP → NeRF
 transform = np.diag([1, -1, -1])  # Y和Z翻转
+
 R = R @ transform
-t = t @ transform  # 或 t = transform @ t（根据约定）
+T = transform @ T  # 或 T = T @ transform（根据约定）
 ```
 
 **验证方法**：
-- 用初始点云渲染，看是否与输入图像对齐
-- 如果图像左右颠倒或上下颠倒，调整R的符号
+1. 用初始高斯渲染一帧
+2. 与GT图像并排显示
+3. 如果左右/上下颠倒，调整R/T符号
 
 ---
 
-## 五、数据集结构
+### 4.2 内参矩阵K
 
-### 5.1 标准结构（参考NeRF）
-
-```
-dataset/
-├── images/          # 所有图像
-│   ├── 0001.png
-│   ├── 0002.png
-│   └── ...
-├── sparse/          # COLMAP输出
-│   ├── cameras.bin
-│   ├── images.bin
-│   └── points3D.bin
-└── transforms.json  # 可选，NeRF格式
-```
-
-**transforms.json 格式**：
-```json
-{
-  "camera_angle_x": 0.6911112070083618,
-  "frames": [
-    {
-      "file_path": "images/0001",
-      "transform_matrix": [[...], [...], [...], [...]]
-    }
-  ]
-}
+**从COLMAP相机参数**：
+```python
+def build_K(camera):
+    """camera: pycolmap.Camera对象"""
+    if camera.model == "PINHOLE":
+        fx, fy, cx, cy = camera.params
+        K = np.array([[fx, 0, cx],
+                      [0, fy, cy],
+                      [0,  0,  1]])
+    elif camera.model == "SIMPLE_PINHOLE":
+        fx, cx, cy = camera.params
+        K = np.array([[fx, 0, cx],
+                      [0, fx, cy],
+                      [0,  0,  1]])
+    else:
+        raise NotImplementedError(f"Model {camera.model}")
+    return K
 ```
 
 ---
 
-### 5.2 Dataset类实现
+## 五、数据集类实现
+
+### 5.1 Dataset类框架
 
 ```python
 class SfMDataset(Dataset):
-    def __init__(self, sparse_path, image_path, split='train'):
-        self.sparse_path = Path(sparse_path)
+    def __init__(self, sparse_path, image_path, split='train', scale=1.0):
+        self.recon = pycolmap.Reconstruction(sparse_path)
         self.image_path = Path(image_path)
-
-        # 加载COLMAP reconstruction
-        self.recon = pycolmap.Reconstruction(str(sparse_path))
-
-        # 提取所有图像
-        self.images = list(self.recon.images.values())
-        # 过滤训练/测试（可按文件名或随机）
+        self.scale = scale
+        
+        # 过滤训练/测试
+        all_images = list(self.recon.images.values())
         if split == 'train':
-            self.images = [img for img in self.images if 'train' in img.name]
+            self.images = all_images[:int(0.8*len(all_images))]
         else:
-            self.images = [img for img in self.images if 'test' in img.name]
-
-        # 提取点云
+            self.images = all_images[int(0.8*len(all_images)):]
+        
         self.points3d = list(self.recon.points3D.values())
-
+    
     def __len__(self):
         return len(self.images)
-
+    
     def __getitem__(self, idx):
         img = self.images[idx]
-
+        camera = self.recon.cameras[img.camera_id]
+        
         # 1. 加载图像
         img_file = self.image_path / img.name
         image = Image.open(img_file).convert("RGB")
-        image = torch.from_numpy(np.array(image) / 255.0).float()
-        image = image.permute(2, 0, 1)  # HWC → CHW
-
+        if self.scale != 1.0:
+            new_size = (int(image.width*self.scale), int(image.height*self.scale))
+            image = image.resize(new_size, Image.LANCZOS)
+        image = torch.from_numpy(np.array(image)/255.0).float().permute(2,0,1)
+        
         # 2. 相机参数
-        camera = self.recon.cameras[img.camera_id]
-        K = build_K(camera)  # 见4.1节
-
+        K = build_K(camera)
         R = qvec2rotmat(img.qvec)
-        t = img.tvec
-
-        # 3. 坐标系转换（如需要）
+        T = img.tvec
+        
+        if self.scale != 1.0:
+            K[:2] *= self.scale
+        
+        # 3. 坐标系转换（可选）
         # R = R @ np.diag([1, -1, -1])
-
+        
         return image, {
             'R': torch.tensor(R, dtype=torch.float32),
-            'T': torch.tensor(t, dtype=torch.float32),
+            'T': torch.tensor(T, dtype=torch.float32),
             'K': torch.tensor(K, dtype=torch.float32),
-            'width': camera.width,
-            'height': camera.height,
-            'image_name': img.name
+            'width': int(camera.width * self.scale),
+            'height': int(camera.height * self.scale)
         }
 ```
 
 ---
 
-## 六、初始化高斯集合
+## 六、常见陷阱与诊断
 
-**流程整合**：
+### 6.1 陷阱诊断表
+
+| 症状 | 可能原因 | 检查方法 | 解决方案 |
+|------|----------|----------|----------|
+| **渲染全黑** | Σ太小 | `Sigma.diag().mean()` | scale_factor ×5-10 |
+| **渲染全白** | α太大 | `alpha.mean()` | α初始值调至0.3 |
+| **图像偏移** | 坐标系错 | 渲染vs GT对比 | 调整R/T符号 |
+| **空洞多** | 初始点云稀疏 | `len(points3d)` | SfM调参数增加点 |
+| **条纹伪影** | Σ奇异 | `torch.det(Sigma)` | 添加Σ正则 |
+
+---
+
+### 6.2 调试可视化代码
 
 ```python
-# 1. 加载数据集
-dataset = SfMDataset("data/sparse", "data/images", split='train')
-
-# 2. 从SfM点云初始化高斯
-gaussians = init_gaussians_from_sfm(
-    dataset.points3d,
-    dataset.recon.cameras,
-    dataset.images
-)
-
-print(f"Initialized {len(gaussians)} gaussians")
-# 典型：10k-100k
-
-# 3. 移动到GPU
-gaussians.to('cuda')
-
-# 4. 设置优化器
-optimizer = torch.optim.Adam([
-    {'params': gaussians.mu, 'lr': 1.6e-4},
-    {'params': gaussians.Sigma, 'lr': 1e-3},
-    {'params': gaussians.alpha, 'lr': 5e-2},
-    {'params': gaussians.color, 'lr': 5e-3}
-])
+def debug_initialization(gaussians, camera, H, W):
+    """检查初始化质量"""
+    # 1. 渲染
+    rendered = render(gaussians, camera, H, W)
+    
+    # 2. 统计
+    print(f"高斯数量: {len(gaussians)}")
+    print(f"平均尺度: {gaussians.get_scales().mean():.6f}")
+    print(f"平均α: {gaussians.alpha.mean():.6f}")
+    
+    # 3. 可视化
+    plt.figure(figsize=(12,4))
+    plt.subplot(131)
+    plt.imshow(rendered.permute(1,2,0).cpu().numpy().clip(0,1))
+    plt.title("Initial Render")
+    
+    plt.subplot(132)
+    mu_2d, _, _ = project_gaussian(gaussians.mu, gaussians.Sigma,
+                                    camera['R'], camera['T'], camera['K'])
+    plt.scatter(mu_2d[:,0].cpu(), mu_2d[:,1].cpu(), s=1, alpha=0.5)
+    plt.xlim(0, W); plt.ylim(H, 0)
+    plt.title(f"Projected centers ({len(gaussians)})")
+    
+    plt.subplot(133)
+    scales = gaussians.get_scales().max(dim=1)[0].cpu()
+    plt.hist(scales.numpy(), bins=50)
+    plt.title("Scale distribution")
+    plt.tight_layout()
+    plt.show()
 ```
 
 ---
 
-## 七、常见陷阱与解决
+## 七、思考题
 
-### 陷阱1：坐标系不一致
-
-**症状**：渲染图像与GT图像不匹配（旋转/翻转）
-
-**诊断**：
-- 用初始高斯渲染一帧，与GT并排显示
-- 如果左右颠倒：R的y或z轴符号错
-- 如果上下颠倒：R的y轴符号错
-
-**解决**：
-```python
-# 尝试不同变换
-transforms = [
-    np.eye(3),
-    np.diag([1, -1, -1]),
-    np.diag([-1, 1, -1]),
-    np.diag([-1, -1, 1])
-]
-```
+1. **尺度估计**：如果SfM重投影误差都很小（<1像素），说明什么？应该怎么调scale_factor？
+2. **坐标系**：如果COLMAP用OpenGL坐标系（右手Y-up），而渲染用OpenCV（右手Z-up），写出完整的变换矩阵
+3. **初始化策略**：为什么不直接用SfM点云作为"点"开始训练，而要加高斯？实验点精灵渲染，观察效果
+4. **数据增强**：在训练时，可以对图像做哪些增强？对相机参数有什么影响？
 
 ---
 
-### 陷阱2：尺度初始化过小
+## 八、下一章预告
 
-**症状**：训练初期画面全黑（高斯太小，投影后值接近0）
-
-**诊断**：
-- 检查 `gaussians.Sigma.diagonal().mean()` 是否 < 0.001
-- 渲染时所有高斯值接近0
-
-**解决**：
-- 增大尺度估计的乘子：`scale = median_error * 5.0`（原0.5）
-- 或直接设置最小初始尺度：`sigma = max(sigma, 0.1)`
-
----
-
-### 陷阱3：不透明度初始化过低
-
-**症状**：画面暗淡（α=0.5但高斯小，叠加后仍暗）
-
-**解决**：
-- α 初始化为 0.8 或 1.0
-
----
-
-### 陷阱4：SfM点云噪声
-
-**症状**：某些点明显是outlier，初始化后成为坏高斯
-
-**诊断**：
-- 检查重投影误差分布：`errors = [p.error for p in points3d]`
-- 如果存在误差 > 10像素的点，考虑过滤
-
-**解决**：
-```python
-# 过滤重投影误差大的点
-max_error = 5.0  # 像素
-filtered_points = [p for p in points3d if p.error < max_error]
-```
-
----
-
-## 八、思考题（独立重推检验）
-
-1. **为什么SfM点云的尺度估计这么关键**？如果所有高斯初始尺度都是0.001，会发生什么？
-2. **重投影误差和3D高斯的尺度有什么几何关系**？画图说明一个点在两个视角下的误差如何反映3D位置不确定性。
-3. **为什么不直接用SfM点云作为"点"渲染**，而要加高斯？尝试用点精灵渲染初始点云，看看效果缺什么？
-4. **坐标系转换**：如果COLMAP用右手Y-up，而渲染用右手Z-up，你需要哪些矩阵变换？写出变换矩阵。
-
----
-
-## 九、下一章预告
-
-**第7章**：完整训练流程 - 将所有组件（渲染、损失、优化、密度控制）整合成闭环，详细讲解训练循环、学习率调度、收敛判断。
+**第7章**：完整训练流程 - 将所有组件整合成闭环，详解训练循环、学习率调度、收敛判断、常见问题诊断。
 
 ---
 
 **关键记忆点**：
-- ✅ SfM工具：COLMAP（二进制格式 + pycolmap API）
-- ✅ 尺度估计：从重投影误差的中位数
-- ✅ 初始化：μ=点云xyz, c=RGB/255, Σ=scale²·I, α=0.5
-- ✅ 坐标系：注意COLMAP与渲染坐标系的差异
+- ✅ SfM工具：COLMAP（二进制 + pycolmap API）
+- ✅ 尺度估计：scale = median(重投影误差) × factor
+- ✅ 初始化：μ=xyz, c=RGB/255, Σ=scale²·I, α=0.5
+- ✅ 坐标系：注意COLMAP与渲染坐标系的差异（Y/Z翻转）
 - 🎯 **初始化质量决定训练稳定性**

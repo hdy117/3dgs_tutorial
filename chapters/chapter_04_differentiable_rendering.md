@@ -6,344 +6,550 @@
 
 ---
 
-## 一、引言：从数学公式到实际渲染
+## 一、渲染管线总览
 
-### 1.1 第3章回顾
+### 1.1 完整流程图
 
-第3章我们推导了：
-- 3D高斯参数：μ, Σ, α, c
-- 投影公式：μ₂D, Σ₂D（透视投影）
-- Alpha Blending：按深度排序 + 累加
-
-### 1.2 本章任务
-
-将这些公式组合成**可运行的渲染管线**：
-
-```
-输入：{ (μ_i, Σ_i, α_i, c_i) }，相机参数 K, R, t
-输出：2D图像 C（H×W×3）
-过程：
-  1. 投影：μ_i → 2D坐标，Σ_i → 2D协方差
-  2. 计算2D高斯值（每个像素）
-  3. 按深度排序
-  4. Alpha blending 累加颜色
+```mermaid
+flowchart TD
+    A[输入: 高斯集合<br/>{μ,Σ,α,c} + 相机] --> B[Step1: 投影]
+    B --> C[μ₂D, Σ₂D, depth]
+    C --> D[Step2: 按depth排序]
+    D --> E[Step3: Tile预筛选]
+    E --> F[Step4: Alpha Blending]
+    F --> G[输出: 2D图像 C]
+    
+    subgraph "可微路径"
+        B -.-> H[梯度]
+        C -.-> H
+        F -.-> H
+    end
+    
+    H --> I[反向传播到μ,Σ,α,c]
 ```
 
 ---
 
-## 二、Step 1：3D → 2D投影（透视相机）
+### 1.2 时间复杂度分析
 
-### 2.1 3D中心投影
+| 阶段 | 操作 | 复杂度 | 典型时间(N=1M) |
+|------|------|--------|----------------|
+| 投影 | 矩阵乘法 | O(N) | 2-5 ms |
+| 排序 | quick sort | O(N log N) | 5-10 ms |
+| Tile预筛选 | 包围盒计算 | O(N) | 1-2 ms |
+| 渲染 | 每像素遍历tile内高斯 | O(N·100) | 5-15 ms |
+| **总计** | - | - | **13-32 ms** |
 
-**标准小孔模型**：
-```
-x_2d = K * (R * μ + t)
-其中：
-  μ ∈ ℝ³ 世界坐标
-  R, t 相机外参
-  K ∈ ℝ³ˣ³ 内参矩阵（fx, fy, cx, cy）
-```
-
-**深度z**：
-- 在相机坐标系：z = (Rμ + t)_z
-- 用于排序
+**瓶颈**：渲染阶段（像素遍历）
 
 ---
 
-### 2.2 3D协方差投影到2D
+## 二、Step 1：投影（3D → 2D）
 
-**挑战**：透视投影是非线性的（x = X/Z）
+### 2.1 相机坐标系转换
 
-**推导**（详见3DGS论文附录）：
-
-令相机坐标系下的3D点：X = R * μ + t
-透视投影：x = K * [X_x/X_z, X_y/X_z]ᵀ
-
-**雅可比矩阵 J**（投影变换的线性近似）：
+**世界 → 相机**：
 ```
-J = ∂x/∂X = [1/Z  0  -X_x/Z²]
-            [0  1/Z  -X_y/Z²]  * K
+X_cam = R · (μ - t)  # 注意：有些约定是R·μ + t
+实际: X_cam = R·μ + t
+```
+
+**代码**：
+```python
+mu_cam = torch.bmm(R, mu.unsqueeze(-1)).squeeze(-1) + T  # (N,3)
+```
+
+---
+
+### 2.2 投影中心计算
+
+**小孔模型**：
+```
+x_norm = [X_x/Z, X_y/Z]
+x_pixel = K · x_norm
+```
+
+**代码**：
+```python
+mu_hom = torch.bmm(K, mu_cam.unsqueeze(-1)).squeeze(-1)  # (N,3)
+mu_2d = mu_hom[:, :2] / mu_hom[:, 2:3]  # 除以z
+```
+
+---
+
+### 2.3 协方差投影（核心数学）
+
+**透视投影的雅可比矩阵**：
+
+对于相机坐标系点 X = (X, Y, Z)：
+```
+x = K[0,0]·X/Z + K[0,2]
+y = K[1,1]·Y/Z + K[1,2]
+
+∂x/∂X = K[0,0]/Z
+∂x/∂Y = 0
+∂x/∂Z = -K[0,0]·X/Z²
+
+∂y/∂X = 0
+∂y/∂Y = K[1,1]/Z
+∂y/∂Z = -K[1,1]·Y/Z²
+
+J = [K00/Z, 0, -K00·X/Z²]
+    [0, K11/Z, -K11·Y/Z²]
 ```
 
 **投影协方差**：
 ```
-Σ_2D = J * W * Σ * Wᵀ * Jᵀ
-其中 W = R（将世界坐标转到相机坐标系）
+Σ_2D = J · (R·Σ·Rᵀ) · Jᵀ
 ```
 
-**简化理解**：
-- 透视投影相当于在3D空间先乘以R，再用非线性x=X/Z投影
-- 雅可比J近似了非线性在局部的影响
-- 对于靠近中心线（小视差）的高斯，近似是准确的
-
-**实际实现**：
+**代码**：
 ```python
-# 1. 转到相机坐标系
-mu_cam = R @ mu + t  # (3,)
-Sigma_cam = R @ Sigma @ R.T  # (3,3)
+# 1. Σ转到相机坐标系
+Sigma_cam = R @ Sigma @ R.T  # (N,3,3)
 
-# 2. 计算雅可比
-z = mu_cam[2]
-J = torch.tensor([
-    [K[0,0]/z, 0, -K[0,0]*mu_cam[0]/z**2],
-    [0, K[1,1]/z, -K[1,1]*mu_cam[1]/z**2]
-], device=mu.device)  # (2,3)
+# 2. 计算雅可比J
+z = mu_cam[:, 2].clamp(min=1e-6)  # (N,)
+J = torch.zeros((N, 2, 3), device=mu.device)
+J[:, 0, 0] = K[0, 0] / z
+J[:, 0, 2] = -K[0, 0] * mu_cam[:, 0] / (z**2)
+J[:, 1, 1] = K[1, 1] / z
+J[:, 1, 2] = -K[1, 1] * mu_cam[:, 1] / (z**2)
 
-# 3. 投影协方差
-Sigma_2d = J @ Sigma_cam @ J.T  # (2,2)
+# 3. Σ_2D
+Sigma_2d = J @ Sigma_cam @ J.transpose(1, 2)  # (N,2,2)
 ```
 
 ---
 
-## 三、Step 2：2D高斯在像素网格上的评估
+### 2.4 数值稳定性
 
-### 3.1 2D高斯函数
+**问题**：
+- z接近0 → J很大 → Σ_2D爆炸
+- Σ_cam接近奇异 → 数值不稳定
 
-给定：
-- 中心 μ_2D = (u, v) 像素坐标
-- 协方差 Σ_2D = [[σ_uu, σ_uv], [σ_uv, σ_vv]]
+**解决方案**：
+```python
+# 1. 限制z最小值
+z = mu_cam[:, 2].clamp(min=1e-6)
 
-对于任意像素 x = (i, j)，高斯值为：
-```
-G(x) = exp(-0.5 * (x - μ)^T Σ⁻¹ (x - μ))
+# 2. Σ_2D添加正则项
+epsilon = 1e-8
+Sigma_2d = Sigma_2d + torch.eye(2, device=mu.device)[None,:,:] * epsilon
+
+# 3. 限制Σ的特征值范围
+eigvals, eigvecs = torch.linalg.eigh(Sigma_2d)
+eigvals = eigvals.clamp(min=1e-6, max=1e2)
+Sigma_2d = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(1,2)
 ```
 
 ---
 
-### 3.2 计算优化
+## 三、Step 2：深度排序
 
-**问题**：直接计算逆矩阵 Σ⁻¹ 是O(4)操作，可接受但略慢
+### 3.1 排序依据选择
 
-**优化方案**：
+| 候选 | 公式 | 精度 | 速度 | 推荐 |
+|------|------|------|------|------|
+| 中心深度 | z = μ_cam[2] | ⚠️ 近似 | ✅ 快 | ✅ **推荐** |
+| 平均深度 | 高斯质心深度 | ✅ 更准 | ⚠️ 需计算 | ⚠️ 可选 |
+| 最近点 | min(μ-3σ) | ✅ 最准 | ❌ 慢 | ❌ 不推荐 |
 
-**方案A：Cholesky分解**
+**为什么中心深度足够？**
+- 高斯有体积，但中心是质心
+- 对于细长高斯，中心和质心接近
+- 轻微瑕疵可接受
+
+---
+
+### 3.2 排序实现
+
 ```python
-L = torch.linalg.cholesky(Sigma_2d)  # Σ = L L^T
-diff = x - mu_2D
-solve = torch.triangular_solve(diff, L, upper=False)[0]
+# 计算深度
+depths = mu_cam[:, 2]  # (N,)
+
+# 降序排列（远的先画）
+sorted_indices = torch.argsort(depths, descending=True)
+
+# 重排序所有张量
+mu_2d = mu_2d[sorted_indices]
+Sigma_2d = Sigma_2d[sorted_indices]
+alpha = alpha[sorted_indices]
+color = color[sorted_indices]
+```
+
+**性能**：N=1M时，排序 ~5-10 ms（GPU快速排序）
+
+---
+
+## 四、Step 3：Tile预筛选
+
+### 4.1 为什么需要预筛选？
+
+**问题**：每个高斯理论上影响全图，但实际只影响μ附近3σ范围
+
+**无预筛选复杂度**：
+```
+每像素遍历所有高斯: O(H·W·N)
+H=1200, W=900, N=1M → 1.08×10¹² 次操作 ❌
+```
+
+**预筛选后**：
+```
+每个高斯影响 ~100像素
+总操作: N × 100 = 10⁸ ✅
+加速: 10,000倍！
+```
+
+---
+
+### 4.2 包围盒计算
+
+**2D高斯3σ范围**：
+```
+μ₂D ± 3·√(最大特征值)
+```
+
+**代码**：
+```python
+def compute_bbox(mu_2d, Sigma_2d, scale=3.0):
+    """计算高斯的屏幕空间包围盒"""
+    # 特征值 = 半轴长度平方
+    eigvals = torch.linalg.eigvalsh(Sigma_2d)  # (N,2)
+    radii = scale * torch.sqrt(eigvals.max(dim=1)[0])  # (N,)
+    
+    bbox_min = (mu_2d - radii[:, None]).long().clamp(min=0)
+    bbox_max = (mu_2d + radii[:, None]).long().clamp(max=W)  # W: 图像宽
+    
+    return bbox_min, bbox_max  # (N,2)
+```
+
+---
+
+### 4.3 Tile映射（倒排索引）
+
+**Tile划分**：
+```
+图像: H×W
+Tile大小: T=16
+Tile数: n_tiles_x = ceil(W/T), n_tiles_y = ceil(H/T)
+```
+
+**映射过程**：
+```python
+def assign_gaussians_to_tiles(bbox_min, bbox_max, tile_size=16, W=800, H=600):
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles = n_tiles_x * n_tiles_y
+    
+    tile_mapping = [[] for _ in range(n_tiles)]
+    
+    for g_idx in range(len(bbox_min)):
+        x0, y0 = bbox_min[g_idx]
+        x1, y1 = bbox_max[g_idx]
+        
+        # 该高斯影响的所有tile
+        tile_x0 = x0 // tile_size
+        tile_x1 = x1 // tile_size
+        tile_y0 = y0 // tile_size
+        tile_y1 = y1 // tile_size
+        
+        for ty in range(tile_y0, tile_y1+1):
+            for tx in range(tile_x0, tile_x1+1):
+                tile_id = ty * n_tiles_x + tx
+                if 0 <= tile_id < len(tile_mapping):
+                    tile_mapping[tile_id].append(g_idx)
+    
+    return tile_mapping
+```
+
+---
+
+## 五、Step 4：Alpha Blending
+
+### 5.1 算法伪代码
+
+```
+输入: 已排序高斯列表 G[0..N-1]
+输出: 图像 C[H,W,3]
+
+初始化:
+  C = zeros(H,W,3)
+  A = zeros(H,W)  # accumulated alpha
+
+for g in G:
+    # 获取g影响的tile列表
+    for tile in g.tiles:
+        for pixel in tile.pixels:
+            # 计算高斯值
+            diff = pixel - g.μ₂D
+            exponent = -½·diffᵀ·Σ₂D⁻¹·diff
+            g_val = g.α · exp(exponent)
+            
+            # Alpha blending
+            C[pixel] += g_val · g.c · (1 - A[pixel])
+            A[pixel] += g_val
+            
+            if A[pixel] >= 0.99:
+                break  # 早停
+```
+
+---
+
+### 5.2 2D高斯评估优化
+
+**直接求逆**（慢）：
+```python
+inv_Sigma = torch.linalg.inv(Sigma_2d)  # O(8)
+exponent = -0.5 * (diff @ inv_Sigma @ diff)
+```
+
+**Cholesky分解**（快）：
+```python
+L = torch.linalg.cholesky(Sigma_2d)  # Σ = LLᵀ, O(4)
+solve = torch.triangular_solve(diff.unsqueeze(-1), L, upper=False)[0].squeeze()
 exponent = -0.5 * (solve**2).sum()
 ```
 
-**方案B：特征值分解**
+**特征值分解**（最稳）：
 ```python
 eigvals, eigvecs = torch.linalg.eigh(Sigma_2d)
 inv_diag = 1.0 / eigvals.clamp(min=1e-8)
-diff = x - mu_2D
 rotated = eigvecs.T @ diff
 exponent = -0.5 * (rotated**2 * inv_diag).sum()
 ```
 
-**数值稳定性**：
-- 添加小量 ε 到对角线防止奇异：`Sigma_2d + ε * I`
-- 限制协方差的最小/最大特征值（避免过扁或过圆）
+**选择建议**：
+- Cholesky：最快，但Σ需正定（已保证）
+- 特征值：最稳，适合Σ接近奇异的情况
 
 ---
 
-### 3.3 渲染窗口（Tile-based）
+### 5.3 早停策略
 
-**问题**：每个高斯理论上影响整个图像，但实际上只影响μ附近3σ范围
+**条件**：累计不透明度 A[pixel] ≥ 0.99
 
-**优化**：
-- 计算2D高斯的"包围盒"：μ ± 3 * sqrt(最大特征值)
-- 只在该包围盒内评估高斯值
-- 进一步：按图像分块（tile），每个tile预计算需要的高斯列表
-
-**复杂度分析**：
-- 无优化：O(H*W*N) → 不可接受（H*W=2M, N=1M → 2万亿次）
-- 有窗口：每个高斯只影响 ~100像素 → 总复杂度 O(N * 100)
-- 对于 N=1M → 1亿次操作，可接受
-
----
-
-## 四、Step 3：深度排序
-
-### 4.1 为什么需要排序？
-
-**Alpha blending 公式**：
+**原理**：
 ```
-C = Σ (g_i.α * g_i.c * Π_{j<i} (1 - g_j.α))
+剩余透射率 T_rem = Π(1-α_i) 已画的高斯
+当 T_rem < 0.01 时，后续高斯贡献可忽略
 ```
 
-只有从远到近累加，才能正确计算遮挡。
-
-**交换律不成立**：
-```
-a₁·c₁·(1-a₂) + a₂·c₂ ≠ a₂·c₂·(1-a₁) + a₁·c₁
-```
-除非 a₁=0 或 a₂=0
-
----
-
-### 4.2 排序依据
-
-- 使用投影后的深度 z = (Rμ + t)_z
-- 所有高斯按 z **降序**排列（远的先画）
-
-**近似性分析**：
-- 高斯有体积，不是点 → 严格说应该按"质心深度"排序
-- 但对于细长高斯，中心深度是合理近似
-- 实际效果：轻微渲染瑕疵，但可接受
-
-**实现**：
-```python
-depths = (R @ mu.T + t[:, None]).T[:, 2]  # (N,)
-sorted_indices = torch.argsort(depths, descending=True)
-```
-
----
-
-### 4.3 排序的代价
-
-- O(N log N) 排序
-- N=1M 时，~20M次比较 → 在GPU上很快（<1ms）
-- 优化：如果高斯集合不变（推理时），排序可缓存
-
----
-
-## 五、Step 4：Alpha Blending（逐tile累加）
-
-### 5.1 伪代码
-
-```python
-# 初始化
-image = torch.zeros((3, H, W))
-accum_alpha = torch.zeros((1, H, W))
-
-for g in sorted_gaussians:
-    # 计算影响范围 [x_min, x_max] × [y_min, y_max]
-    bbox = compute_bbox(g.mu_2d, g.Sigma_2d)
-    for i in range(bbox.x_min, bbox.x_max):
-        for j in range(bbox.y_min, bbox.y_max):
-            # 计算高斯值
-            value = g.α * exp(-0.5 * quad_form)
-            # Alpha blending
-            image[:,j,i] += value * g.c * (1 - accum_alpha[:,j,i])
-            accum_alpha[:,j,i] += value
-            # 早停
-            if accum_alpha[0,j,i] >= 0.99:
-                break
-```
-
----
-
-### 5.2 并行化策略
-
-**Tile-based并行**：
-- 每个tile独立 → 多线程并行处理不同tile
-- GPU实现：每个block处理一个tile，线程处理像素
-- 需要原子操作更新 accum_alpha（或使用Warp-level reduction）
-
-**内存访问优化**：
-- 高斯数据：连续读取（coalesced）
-- 图像写入：同一block的线程写入相邻像素 → coalesced
+**效果**：
+- 平均每像素只需遍历 ~20-50 高斯（而非全部）
+- 加速 2-5 倍
 
 ---
 
 ## 六、可微分性验证
 
-### 6.1 整个管道的可微节点
+### 6.1 梯度流图
 
+```mermaid
+flowchart LR
+    A[μ,Σ,α,c] --> B[投影: μ₂D,Σ₂D]
+    B --> C[评估: G_i(x)]
+    C --> D[Blending: C(x)]
+    D --> E[损失 L]
+    
+    E -.-> F[∂L/∂C]
+    F -.-> D
+    F -.-> C
+    F -.-> B
+    F -.-> A
+    
+    style B fill:#e1f5e1
+    style C fill:#e1f5e1
+    style D fill:#e1f5e1
 ```
-μ, Σ, α, c  ← 梯度 ← 最终图像 C
-  ↑              ↑
-投影公式        Alpha blending
-  ↑              ↑
-矩阵乘法        乘加运算
-```
-
-### 6.2 关键点
-
-- 投影公式：矩阵乘法 → 可微
-- 高斯评估：指数+二次型 → 可微
-- Alpha blending：乘加 → 可微
-
-### 6.3 唯一"问题"
-
-**排序是离散操作** → 梯度不连续
-
-**实际处理**：
-- 在训练中，排序顺序相对稳定（高斯不会突然跳变）
-- 或使用软化排序（如使用α值加权中心深度的连续近似）
-- 论文：直接使用离散排序，梯度通过固定顺序传播
 
 ---
 
-## 七、实现要点（CUDA视角）
+### 6.2 各操作的可微性
+
+| 操作 | 公式 | 可微？ | 梯度 |
+|------|------|--------|------|
+| 投影(矩阵乘) | μ₂D = K·(Rμ+t) | ✅ | dμ₂D/dμ = K·R |
+| 投影(雅可比) | Σ₂D = J·(RΣRᵀ)·Jᵀ | ✅ | 链式法则 |
+| 高斯评估 | exp(-½·ΔᵀΣ⁻¹Δ) | ✅ | 标准 |
+| Alpha blending | C += α·c·(1-A) | ✅ | 乘加 |
+| **排序** | argsort(depth) | ❌ | **离散，无梯度** |
+
+**排序问题**：
+- 训练时顺序稳定（高斯不跳变）→ 梯度有效
+- 或使用软化排序（如 smooth_rank）
+
+---
+
+## 七、CUDA实现要点
 
 ### 7.1 内存布局
 
-- 所有高斯参数存储在GPU全局内存：N × 13 float
-- SoA（Structure of Arrays）更利于向量化：
-  ```c
-  struct Gaussians {
-      float* mu;       // (N, 3)
-      float* Sigma;    // (N, 6) 对称矩阵
-      float* alpha;    // (N, 1)
-      float* color;    // (N, 3)
-  };
-  ```
+**推荐：Structure of Arrays (SoA)**
+
+```cpp
+// GPU全局内存
+struct Gaussians {
+    float* mu;       // (N,3) 连续存储
+    float* Sigma;    // (N,6) 对称矩阵只存上三角
+    float* alpha;    // (N,1)
+    float* color;    // (N,3)
+    int N;
+};
+```
+
+**为什么SoA？**
+- 读取时连续访问（coalesced）
+- 便于向量化加载（float4）
+- 易于更新部分参数
 
 ---
 
-### 7.2 Kernel设计
+### 7.2 Kernel设计（三阶段）
 
-**三阶段设计**：
+#### Stage 1: Projection Kernel
 
-**Stage 1：Projection kernel**
-```cuda
-__global__ void project_kernel(Gaussian g, Camera cam, Projected* out) {
+```cpp
+__global__ void project_kernel(
+    const float* mu, const float* Sigma,
+    const float* R, const float* T, const float* K,
+    float* mu_2d, float* Sigma_2d, float* depth,
+    int N
+) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx >= N) return;
-    // 计算 mu_2d, Sigma_2d, depth
-    out[idx].mu_2d = ...
-    out[idx].Sigma_2d = ...
-    out[idx].depth = ...
+    
+    // 1. mu_cam = R*mu + T
+    float3 mu_cam = matvec3(R, mu[idx]) + T;
+    depth[idx] = mu_cam.z;
+    
+    // 2. mu_2d = K * (mu_cam.xy / mu_cam.z)
+    float inv_z = 1.0f / mu_cam.z;
+    float2 mu_hom = make_float2(
+        K[0]*mu_cam.x + K[2],
+        K[4]*mu_cam.y + K[5]
+    ) * inv_z;
+    mu_2d[idx] = mu_hom;
+    
+    // 3. Sigma_cam = R * Sigma * R^T
+    float3x3 Sigma_cam = matmul3(R, Sigma[idx], R.T);
+    
+    // 4. J矩阵
+    float J[2][3] = {
+        {K[0]*inv_z, 0, -K[0]*mu_cam.x*inv_z*inv_z},
+        {0, K[4]*inv_z, -K[4]*mu_cam.y*inv_z*inv_z}
+    };
+    
+    // 5. Sigma_2d = J * Sigma_cam * J^T
+    float3x3 temp = matmul3(J, Sigma_cam);
+    Sigma_2d[idx] = matmul2x3(temp, J.T);
 }
 ```
 
-**Stage 2：Sort kernel**
-- 使用Thrust库：`thrust::sort_by_key(depths, indices)`
+---
 
-**Stage 3：Render kernel**
-```cuda
-__global__ void render_kernel(Projected* gaussians, int N, Camera cam, uchar4* image) {
-    // 每个block处理一个tile
+#### Stage 2: Sort Kernel（使用Thrust）
+
+```cpp
+// 调用Thrust
+thrust::sort_by_key(
+    thrust::device,      // 执行策略
+    depths,              // 键（深度）
+    depths+N,            // 键结束
+    indices              // 输出排序索引
+);
+```
+
+---
+
+#### Stage 3: Render Kernel（Tile-based）
+
+```cpp
+__global__ void render_kernel_tiled(
+    const Gaussian* gaussians,  // 已排序
+    const int* tile_start,      // 每个tile的高斯起始索引
+    const int* tile_count,      // 每个tile的高斯数量
+    uchar4* image,
+    int H, int W, int tile_size
+) {
     int tile_x = blockIdx.x;
     int tile_y = blockIdx.y;
-    // 共享内存缓存该tile涉及的高斯
-    extern __shared__ Projected shared_gaussians[];
-    // 预筛选 + 加载
-    // 每个像素累加
+    int tile_id = tile_y * gridDim.x + tile_x;
+    
+    // 该tile的像素范围
+    int x0 = tile_x * tile_size;
+    int x1 = min(x0 + tile_size, W);
+    int y0 = tile_y * tile_size;
+    int y1 = min(y0 + tile_size, H);
+    
+    // Shared memory缓存该tile的高斯
+    extern __shared__ Gaussian shared_gaussians[];
+    int shared_count = 0;
+    
+    // 加载该tile涉及的所有高斯
+    for (int i = threadIdx.x; i < tile_count[tile_id]; i += blockDim.x) {
+        int g_idx = tile_start[tile_id] + i;
+        shared_gaussians[i] = gaussians[g_idx];
+    }
+    __syncthreads();
+    shared_count = tile_count[tile_id];
+    
+    // 每个线程处理一个像素
+    int px = x0 + threadIdx.x % tile_size;
+    int py = y0 + threadIdx.x / tile_size;
+    if (px >= x1 || py >= y1) return;
+    
+    float3 color = make_float3(0,0,0);
+    float alpha_acc = 0.0f;
+    
+    for (int i = 0; i < shared_count; i++) {
+        Gaussian& g = shared_gaussians[i];
+        
+        // 2D高斯评估
+        float2 diff = make_float2(px - g.mu_2d.x, py - g.mu_2d.y);
+        float exponent = evaluate_gaussian_2d(diff, g.Sigma_2d);
+        float g_val = g.alpha * expf(exponent);
+        
+        // Alpha blending
+        color.x += g_val * g.color.x * (1 - alpha_acc);
+        color.y += g_val * g.color.y * (1 - alpha_acc);
+        color.z += g_val * g.color.z * (1 - alpha_acc);
+        alpha_acc += g_val;
+        
+        if (alpha_acc >= 0.99f) break;
+    }
+    
+    // 写入输出
+    int pixel_idx = py * W + px;
+    image[pixel_idx] = make_uchar4(
+        color.x * 255,
+        color.y * 255,
+        color.z * 255,
+        255
+    );
 }
 ```
 
 ---
 
-### 7.3 内存访问模式
+## 八、思考题（深度重推）
 
-- 高斯数据：连续读取（coalesced）
-- 图像写入：block内线程写相邻像素 → 合并访问
-
----
-
-## 八、思考题（独立重推检验）
-
-1. **透视投影推导**：自己推导雅可比矩阵 J。假设相机坐标系下点X=(X, Y, Z)，写出投影到归一化坐标 x=X/Z, y=Y/Z 的偏导数。
-2. **排序的影响**：如果两个高斯深度相同但顺序颠倒，Alpha blending结果是否相同？为什么？
-3. **性能分析**：假设N=1M高斯，每帧只渲染100k高斯的窗口。总复杂度是多少？如果图像分辨率为800×600，总像素数480k，哪个是瓶颈？
-4. **可微性边界**：如果我们在训练时使用排序，但推理时不排序（假设顺序固定），梯度会受影响吗？为什么？
+1. **性能瓶颈**：如果N=3M高斯，Tile预筛选能减少多少计算？估算具体数字
+2. **排序稳定性**：训练中高斯参数在变，深度顺序会变吗？什么时候需要重排？
+3. **数值精度**：float16在投影计算中哪里可能不稳定？如何检测？
+4. **并行度**：如果block大小=256，每个tile高斯的加载如何设计warp调度？
 
 ---
 
 ## 九、下一章预告
 
-**第5章**：优化目标与损失函数 - 如何让高斯学习到正确的形状和颜色？详解重建损失（L1+SSIM）、正则化项、自适应密度控制。
+**第5章**：优化目标与损失函数 - 如何设计损失让高斯学到正确的形状和颜色？详解L1+SSIM、正则化、密度控制。
 
 ---
 
 **关键记忆点**：
 - ✅ 投影：μ₂D = K(Rμ+t), Σ₂D = J·(RΣRᵀ)·Jᵀ
-- ✅ 排序：按深度降序，保证Alpha blending正确
-- ✅ Tile优化：每个高斯只影响局部像素
-- ✅ 可微：整个管线可反向传播
-- 🎯 **渲染复杂度：O(N·窗口大小)，不是O(N·H·W)**
+- ✅ 排序：按深度降序，保证Alpha blending
+- ✅ Tile优化：预筛选减少99%计算
+- ✅ 早停：累计α≥0.99停止
+- 🎯 **渲染复杂度**：O(N·窗口大小) ≈ O(N·100)，不是O(N·H·W)
