@@ -2,199 +2,236 @@
 
 **学习路径**：`example`（最小可行案例）
 
----
-
-## 引言：把碎片拼成闭环
-
-本章整合：
-- 第4章：渲染管线
-- 第5章：损失函数
-- 第6章：数据准备
-- 密度控制策略
-
-**目标**：写出能真正跑起来的训练循环（伪代码级）
+**核心目标**：将所有组件整合成可运行的训练闭环
 
 ---
 
-## 1. 训练架构总览
+## 一、训练架构总览
 
-```python
-# 初始化
-gaussians = load_from_sfm(sfm_output)   # 第6章
-optimizer = Adam([gaussians.params], lr=1e-3)
-dataset = load_dataset(sfm_output)
+### 1.1 完整流程图
 
-# 训练
-for step in range(total_steps):
-    # 1. 采样一批视角
-    camera = dataset.sample_camera()
+```
+┌─────────────────────────────────────────────────────┐
+│                    训练循环                          │
+├─────────────────────────────────────────────────────┤
+│  1. 采样视角  →  camera, gt_image                   │
+│  2. 渲染      →  rendered_image = render(gaussians) │
+│  3. 计算损失  →  loss = L_img + λ·正则化            │
+│  4. 反向传播  →  loss.backward()                    │
+│  5. 参数更新  →  optimizer.step()                   │
+│  6. 密度控制  →  densify_and_prune()（每N步）      │
+│  7. 学习率调度→  lr_decay（特定步数）               │
+│  8. 日志监控  →  PSNR, SSIM, 高斯数量              │
+└─────────────────────────────────────────────────────┘
+```
 
-    # 2. 渲染
-    rendered_image = render(gaussians, camera)  # 第4章
+### 1.2 数据流
 
-    # 3. 加载GT图像
-    gt_image = dataset.get_image(camera)
-
-    # 4. 计算损失
-    loss = compute_loss(rendered_image, gt_image, gaussians)  # 第5章
-
-    # 5. 反向传播
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    # 6. 密度控制（每N步）
-    if step % densify_interval == 0:
-        densify_and_prune(gaussians, optimizer)
-
-    # 7. 日志
-    if step % log_interval == 0:
-        log_metrics(step, loss, rendered_image, gt_image)
+```
+Dataset → (image, camera)
+         ↓
+    Gaussians (μ, Σ, α, c)
+         ↓
+    Renderer → rendered_image
+         ↓
+    Losses → total_loss
+         ↓
+    Backprop → gradients
+         ↓
+    Optimizer → updated_gaussians
+         ↓
+    Density Control → densify / prune
 ```
 
 ---
 
-## 2. 损失函数实现
+## 二、核心组件详解
+
+### 2.1 数据集（Dataset）
+
+**要求**：
+- 随机采样视角（训练时）
+- 固定视角（测试时）
+- 返回：图像（C×H×W）、相机参数（R, T, K）
+
+**实现**（见第6章）：
+```python
+dataset = SfMDataset(sparse_path, image_path, split='train')
+dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+```
+
+---
+
+### 2.2 高斯模型（GaussianModel）
+
+**参数**：
+- `mu`: (N, 3) - 位置
+- `Sigma`: (N, 3, 3) - 协方差（对称）
+- `alpha`: (N, 1) - 不透明度
+- `color`: (N, 3) - RGB颜色
+
+**关键方法**：
+```python
+class GaussianModel:
+    def get_scales(self):
+        """从Σ提取各轴尺度（特征值开根）"""
+        eigvals = torch.linalg.eigvalsh(self.Sigma)  # (N, 3)
+        return torch.sqrt(eigvals)  # (N, 3)
+
+    def get_rotation(self):
+        """从Σ提取旋转矩阵（特征向量）"""
+        eigvals, eigvecs = torch.linalg.eigh(self.Sigma)
+        return eigvecs  # (N, 3, 3)
+```
+
+---
+
+### 2.3 渲染器（Renderer）
+
+**输入**：
+- 高斯模型
+- 相机参数（R, T, K）
+- 图像分辨率（H, W）
+
+**输出**：
+- 渲染图像 (3, H, W)
+- 每个高斯的投影半径（用于densify）
+
+**实现要点**：
+- 使用tile-based优化（第4章）
+- 返回 `radii`：每个高斯在屏幕上的投影半径（像素）
+- 关闭梯度：推理部分用 `torch.no_grad()`
 
 ```python
-def compute_loss(render, gt, gaussians):
-    # 重建损失
-    l1 = torch.abs(render - gt).mean()
-    ssim = 1 - ms_ssim(render, gt)  # 多尺度SSIM
-    L_img = (1 - λ) * l1 + λ * ssim
+def render(gaussians, camera, H, W):
+    with torch.no_grad():
+        # 1. 投影
+        mu_2d, Sigma_2d, depth = project_gaussians(
+            gaussians.mu, gaussians.Sigma, camera.R, camera.T, camera.K
+        )
+        # 2. 计算投影半径（用于densify）
+        radii = compute_radii(Sigma_2d)  # (N,)
 
-    # 正则化
-    scale = gaussians.get_scales()  # 各轴尺度
-    L_scale = torch.clamp(scale - 1.0, min=0).mean()  # 惩罚过大的尺度
-    L_opacity = torch.clamp(gaussians.alpha - 0.99, min=0).mean()  # 惩罚过高的α
+    # 3. 排序
+    indices = torch.argsort(depth, descending=True)
+
+    # 4. Tile-based rendering（可微）
+    image = render_tiled(gaussians, indices, mu_2d, Sigma_2d, H, W)
+
+    return image, radii
+```
+
+---
+
+### 2.4 损失函数（Loss）
+
+**总损失**：
+```python
+def compute_loss(rendered, gt, gaussians, λ_ssim=0.8, λ_scale=0.01):
+    # 1. 重建损失
+    L1 = F.l1_loss(rendered, gt)
+    L_ssim = 1 - ms_ssim(rendered, gt)
+    L_img = (1 - λ_ssim) * L1 + λ_ssim * L_ssim
+
+    # 2. 尺度正则
+    scales = gaussians.get_scales()  # (N, 3)
+    L_scale = torch.clamp(scales - 1.0, min=0).mean()
+
+    # 3. 不透明度正则（可选）
+    L_opacity = torch.clamp(gaussians.alpha - 0.99, min=0).mean()
 
     L_total = L_img + λ_scale * L_scale + λ_opacity * L_opacity
-    return L_total
-```
-
-**注意**：
-- `get_scales()`：从协方差 Σ 提取各轴长度（特征值开根）
-- 正则化项的 clamp 确保只有"过大"值被惩罚
-
----
-
-## 3. 密度控制详解
-
-### 3.1 确定哪些高斯需要操作
-
-** Densify（分裂）条件**：
-1. 该高斯在某个视角下的**投影尺度** > 阈值（如 0.05 * image_size）
-   - 说明3D尺度太大，应该分成两个
-2. 且该高斯的**梯度**足够大
-   - `|∂L/∂μ| > threshold` 或 `|∂L/∂Σ| > threshold`
-   - 说明该高斯对损失影响大，需要更精细表示
-
-**Prune（删除）条件**：
-- α < α_threshold（如 0.001）
-- 且尺度 < scale_threshold（太小的点可删）
-
----
-
-### 3.2 Densify操作
-
-**方法A：克隆（Clone）**
-- 在当前位置 μ 再放一个同样的高斯
-- 用途：在梯度大的位置增加密度
-
-**方法B：分裂（Split）**
-- 将一个大高斯沿主方向分成两个
-- 新尺度 = 原尺度 / √2
-- 新位置 = μ ± 0.01 * 主方向（微小偏移）
-
-**实现**：
-```python
-def densify(gaussians, grads, grad_threshold, scale_threshold, camera):
-    to_clone = []
-    to_split = []
-
-    for i, g in enumerate(gaussians):
-        # 1. 投影尺度
-        proj_scale = project_scale(g.Sigma, camera)  # 投影后的半轴长度（像素）
-        max_proj_scale = proj_scale.max()
-
-        # 2. 梯度幅度
-        grad_norm = grads[i].norm()
-
-        if max_proj_scale > scale_threshold and grad_norm > grad_threshold:
-            if g.Sigma.mean() > 0.01:  # 尺度较大，适合分裂
-                to_split.append(i)
-            else:  # 尺度小，只克隆
-                to_clone.append(i)
-
-    # 执行操作
-    for idx in to_split:
-        split_gaussian(gaussians, idx)
-    for idx in to_clone:
-        clone_gaussian(gaussians, idx)
+    return L_total, L1, L_ssim
 ```
 
 ---
 
-### 3.3 Prune操作
+## 三、密度控制实现
+
+### 3.1 梯度缓存
+
+**时机**：反向传播后，optimizer.step() 前
 
 ```python
-def prune(gaussians, alpha_threshold, scale_threshold):
-    keep_mask = []
-    for g in gaussians:
-        scale = g.get_scale().max()
-        if g.alpha > alpha_threshold and scale > scale_threshold:
-            keep_mask.append(True)
-        else:
-            keep_mask.append(False)
-    gaussians.mask = keep_mask  # 标记删除
-    optimizer.prune(keep_mask)  # 同时清理优化器状态
+# 反向传播后
+loss.backward()
+
+# 缓存梯度幅度
+grads_mu = gaussians.mu.grad.detach().norm(dim=1)  # (N,)
+grads_Sigma = gaussians.Sigma.grad.detach()
+grads_Sigma = grads_Sigma.view(gaussians.N, -1).norm(dim=1)  # (N,)
 ```
 
-**注意**：删除后，gaussians列表其实没变，只是mask标记。实际实现中可能真的删除数组元素，但优化器参数需要同步。
+---
+
+### 3.2 Densify & Prune
+
+```python
+def densify_and_prune(gaussians, optimizer, radii,
+                      grads_mu, grads_Sigma,
+                      grad_threshold=0.0002,
+                      scale_threshold=0.01,
+                      prune_alpha=0.001,
+                      max_gaussians=2e6):
+    with torch.no_grad():
+        # 1. Densify条件
+        large_scale = radii > scale_threshold
+        large_grad = (grads_mu > grad_threshold) | \
+                     (grads_Sigma > grad_threshold)
+        to_densify = large_scale & large_grad
+
+        # 2. 执行densify（克隆或分裂）
+        if to_densify.any():
+            # 简化：只克隆（不分裂）
+            new_mu = gaussians.mu[to_densify].clone()
+            new_Sigma = gaussians.Sigma[to_densify].clone()
+            new_alpha = gaussians.alpha[to_densify].clone()
+            new_color = gaussians.color[to_densify].clone()
+
+            gaussians.extend(new_mu, new_Sigma, new_alpha, new_color)
+            optimizer.add_param_group([
+                {'params': new_mu},
+                {'params': new_Sigma},
+                {'params': new_alpha},
+                {'params': new_color}
+            ])
+
+        # 3. Prune条件
+        scales = gaussians.get_scales().max(dim=1)[0]
+        to_prune = (gaussians.alpha.squeeze() < prune_alpha) | \
+                   (scales < 1e-6)
+
+        if to_prune.any():
+            keep_mask = ~to_prune
+            gaussians.mask = keep_mask
+            optimizer.prune(keep_mask)  # 需要实现optimizer.prune
+
+        # 4. 高斯数量上限
+        if len(gaussians) > max_gaussians:
+            # 随机删除多余高斯
+            keep = torch.randperm(len(gaussians))[:int(max_gaussians)]
+            gaussians.mask = keep
+            optimizer.prune(keep)
+```
+
+**注意**：`optimizer.prune()` 需要自己实现：
+```python
+def prune_optimizer(optimizer, keep_mask):
+    """根据keep_mask删除优化器中的参数"""
+    # 对每个param_group
+    for group in optimizer.param_groups:
+        new_params = []
+        for i, param in enumerate(group['params']):
+            if keep_mask[i]:
+                new_params.append(param)
+        group['params'] = new_params
+```
 
 ---
 
-### 3.4 密度控制时机
+## 四、学习率调度
 
-- 每 **1000步**（或根据数据量调整）执行一次
-- 太频繁：计算开销大（需要计算每个高斯的投影尺度和梯度）
-- 太稀疏：密度调整不及时，训练不稳定
-
----
-
-## 4. 训练监控指标
-
-### 4.1 图像质量指标
-
-- **PSNR**（峰值信噪比）：
-  ```
-  PSNR = 10 * log10(MAX² / MSE)
-  ```
-  - 越高越好，>30 算不错，>35 优秀
-
-- **SSIM**（结构相似性）：
-  - 0~1，越接近1越好
-
-- **LPIPS**（感知相似性）：
-  - 越低越好（学习感知图像块相似度）
-
-### 4.2 高斯统计指标
-
-- **高斯数量**：初始N → 最终N'（通常增长2-3倍）
-- **平均尺度**：应该稳定在合理范围（如 [0.01, 1.0] 世界坐标单位）
-- **平均α**：应该集中在 [0.5, 0.95]
-
-### 4.3 梯度监控
-
-- 记录 |∂L/∂μ|, |∂L/∂Σ| 的分布
-- 如果梯度长期很小 → 学习率可能太小或高斯已收敛
-- 如果梯度爆炸 → 降低学习率或加梯度裁剪
-
----
-
-## 5. 训练调度（Scheduling）
-
-### 5.1 学习率调整
+### 4.1 三阶段调度
 
 **阶段1**（0-7k步）：快速生长
 - lr = 1e-2（所有参数）
@@ -208,22 +245,81 @@ def prune(gaussians, alpha_threshold, scale_threshold):
 - lr = 1e-4
 - 不再densify（只prune）
 
-**为什么分阶段？**
-- 初始：快速增加高斯数量，覆盖场景
-- 中期：稳定优化，避免过度densify
-- 后期：微调已有高斯，防止过拟合
+### 4.2 实现
+
+```python
+# 初始学习率
+initial_lrs = {
+    'mu': 1.6e-4,
+    'Sigma': 1e-3,
+    'alpha': 5e-2,
+    'color': 5e-3
+}
+
+# 调度点
+lr_schedule = {
+    7500: 0.1,   # 乘0.1
+    15000: 0.1   # 再乘0.1
+}
+
+for step in range(total_steps):
+    # ... 训练步骤 ...
+
+    # 学习率调度
+    if step in lr_schedule:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] *= lr_schedule[step]
+        print(f"Step {step}: learning rate decayed to {param_group['lr']}")
+```
 
 ---
 
-### 5.2 密度控制调度
+## 五、训练监控指标
 
--  Densify 只在**前N步**进行（如15k步）
-- 之后只 prune（删除冗余高斯）
-- 最终高斯数量会稳定
+### 5.1 图像质量指标
+
+| 指标 | 公式 | 范围 | 说明 |
+|------|------|------|------|
+| PSNR | 10·log10(MAX²/MSE) | >30 好 | 越高越好 |
+| SSIM | (2μxμy+C1)(2σxy+C2)/(...) | 0~1 | 越接近1越好 |
+| LPIPS | 学习感知距离 | 0~1 | 越低越好 |
+
+**计算**：
+```python
+def psnr(rendered, gt):
+    mse = ((rendered - gt) ** 2).mean()
+    return 10 * torch.log10(1.0 / mse)
+
+def ssim(rendered, gt):
+    return ms_ssim(rendered, gt)  # 使用torchmetrics或自定义
+```
 
 ---
 
-## 6. 完整伪代码（整合版）
+### 5.2 高斯统计指标
+
+- **高斯数量**：初始N → 最终N'（通常增长2-3倍）
+- **平均尺度**：应该稳定在合理范围（如 [0.01, 1.0] 世界坐标单位）
+- **平均α**：应该集中在 [0.5, 0.95]
+- **Σ的条件数**：max(eigval)/min(eigval) → 不应太大（如 < 100）
+
+---
+
+### 5.3 梯度监控
+
+- 记录 |∂L/∂μ|, |∂L/∂Σ| 的分布（均值、分位数）
+- 如果梯度长期很小 → 学习率可能太小或高斯已收敛
+- 如果梯度爆炸 → 降低学习率或加梯度裁剪
+
+```python
+grad_norm_mu = gaussians.mu.grad.norm().item()
+grad_norm_Sigma = gaussians.Sigma.grad.norm().item()
+print(f"Gradient norms: mu={grad_norm_mu:.6f}, Sigma={grad_norm_Sigma:.6f}")
+```
+
+---
+
+## 六、完整训练循环（伪代码）
 
 ```python
 # 超参数
@@ -231,40 +327,48 @@ total_steps = 30000
 densify_interval = 1000
 densify_from = 500
 prune_from = 1500
-learning_rates = {
-    'mu': 1.6e-4,
-    'Sigma': 1e-3,
-    'alpha': 5e-2,
-    'color': 5e-3,
-}
+grad_threshold = 0.0002
+scale_threshold = 0.01  # 像素
 
 # 初始化
 gaussians = init_from_sfm(sfm_points)
-optimizer = Adam(gaussians.parameters(), lr=learning_rates)
+gaussians.to('cuda')
+optimizer = Adam([
+    {'params': gaussians.mu, 'lr': 1.6e-4},
+    {'params': gaussians.Sigma, 'lr': 1e-3},
+    {'params': gaussians.alpha, 'lr': 5e-2},
+    {'params': gaussians.color, 'lr': 5e-3}
+])
 
+# 训练
 for step in range(total_steps):
     # 1. 采样
-    camera = dataset.sample()
-    gt = dataset.get_image(camera)
+    image, camera = dataset[step % len(dataset)]
+    image = image.cuda()
+    camera = {k: v.cuda() for k, v in camera.items()}
 
     # 2. 渲染
-    render, radii = render_gaussians(gaussians, camera)  # radii用于可见性判断
+    rendered, radii = render(gaussians, camera, camera['height'], camera['width'])
 
     # 3. 损失
-    loss, Ll1, Lssim = compute_loss(render, gt, gaussians)
+    loss, L1, L_ssim = compute_loss(rendered, image, gaussians)
 
-    # 4. 反向
+    # 4. 反向传播
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
-    # 5. 梯度缓存（用于densify）
+    # 5. 缓存梯度（densify用）
     if step < densify_from or step % densify_interval == 0:
-        cache_gradients(gaussians)
+        grads_mu = gaussians.mu.grad.detach().norm(dim=1)
+        grads_Sigma = gaussians.Sigma.grad.detach()
+        grads_Sigma = grads_Sigma.view(gaussians.N, -1).norm(dim=1)
 
     # 6. 密度控制
     if densify_from <= step < prune_from and step % densify_interval == 0:
-        densify(gaussians, optimizer, radii, camera)
+        densify_and_prune(gaussians, optimizer, radii,
+                          grads_mu, grads_Sigma,
+                          grad_threshold, scale_threshold)
     if step >= prune_from and step % densify_interval == 0:
         prune(gaussians, optimizer, radii)
 
@@ -275,28 +379,57 @@ for step in range(total_steps):
 
     # 8. 日志
     if step % 100 == 0:
-        print(f"Step {step}: loss={loss:.4f}, PSNR={psnr(render, gt):.2f}")
+        psnr_val = psnr(rendered, image).item()
+        print(f"Step {step:06d}: loss={loss:.4f}, PSNR={psnr_val:.2f}, "
+              f"#gauss={len(gaussians)}, lr={optimizer.param_groups[0]['lr']:.2e}")
+
+        # 保存中间结果
+        if step % 1000 == 0:
+            save_image(rendered, f"output/step_{step:06d}.png")
+            save_gaussians_ply(gaussians, f"output/step_{step:06d}.ply")
+
+    # 9. 验证（每N步在测试集上跑一次）
+    if step % 2000 == 0:
+        evaluate_on_test_set(gaussians, test_dataset)
 ```
 
 ---
 
-## 7. 收敛判断
+## 七、收敛判断
 
-**视觉判断**：
+### 7.1 视觉判断
+
 - 渲染图像与GT无明显差异
 - 几何结构完整（无空洞或无意义噪点）
 
-**定量判断**：
-- PSNR 连续1000步变化 < 0.1 dB
-- 高斯数量稳定（不再增长）
+### 7.2 定量判断
 
-**时间**：
+- **PSNR**：连续1000步变化 < 0.1 dB
+- **高斯数量**：稳定（不再增长）
+- **损失**：趋于平稳
+
+### 7.3 时间
+
 - 通常需要 20k-30k 步（取决于数据规模）
 - 单GPU（RTX 3090/4090）：~30分钟到2小时
 
 ---
 
-## 思考题（独立重推检验）
+## 八、常见问题诊断
+
+| 症状 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| 渲染全黑 | 高斯尺度太小 | 增大初始尺度（scale乘子×5-10） |
+| 渲染全白 | α太大或Σ太大 | 减小α初始值，检查Σ初始化 |
+| 噪点很多 | 高斯数量不足 | 降低grad_threshold，增加densify频率 |
+| 条纹伪影 | Σ奇异（扁高斯） | 添加Σ正则，限制最小特征值 |
+| 训练不收敛 | 学习率太高 | 降低所有参数LR 10倍 |
+| 内存爆炸 | 高斯增长太多 | 降低grad_threshold，提前开始prune |
+| 梯度为0 | 高斯已"死"（α≈0） | 检查α初始化，增大α初始值 |
+
+---
+
+## 九、思考题（独立重推检验）
 
 1. **优化器分组**：为什么不同参数用不同学习率？（μ, Σ, α, c）
 2. **densify时机**：为什么要在densify前缓存梯度？为什么densify后要重置优化器状态？
@@ -305,4 +438,15 @@ for step in range(total_steps):
 
 ---
 
-**下一章**：Feed-Forward推理 - 训练完成后，如何实现实时渲染？
+## 十、下一章预告
+
+**第8章**：Feed-Forward推理 - 训练完成后，如何实现实时渲染（<10ms/帧）？详解推理优化策略（预排序缓存、tile极致优化、float16精度）。
+
+---
+
+**关键记忆点**：
+- ✅ 训练循环：渲染 → 损失 → 反向 → 优化 → densify/prune
+- ✅ 学习率调度：三阶段衰减（1e-2 → 1e-3 → 1e-4）
+- ✅ 密度控制：投影尺度大 + 梯度大 → densify；α太小 → prune
+- ✅ 监控指标：PSNR、高斯数量、梯度范数
+- 🎯 **收敛时间**：20k-30k步，30分钟-2小时（单卡）
