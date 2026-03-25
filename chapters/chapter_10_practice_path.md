@@ -1,658 +1,687 @@
-# 第10章：实践路径 - 从零到可运行的3DGS实现
+# 第10章：从零到可运行——3DGS完整实现实践指南
 
-**学习路径**：`example`（完整实践指南）
+**学习路径**：`problem → invention → verification → integration`
 
-**核心目标**：在1-2周内，用PyTorch实现一个能跑通小数据集的简化版3DGS
-
----
-
-## 一、实践路线图总览
-
-```
-时间线 (3周计划)
-
-Week 1: 基础框架
-  Day 1-2: 环境配置 + 数据加载
-  Day 3-4: 投影渲染（慢速版，先跑通）
-  Day 5-6: 训练循环 + 损失函数（无密度控制）
-  Day 7:   验证能出图（哪怕质量差）
-
-Week 2: 完整流程
-  Day 1-2: 密度控制（densify/prune）
-  Day 3-4: Tile优化（速度提升到可接受）
-  Day 5:   完整训练（30k步） + 评估
-  Day 6-7: 调试优化 + 尝试不同数据集
-
-Week 3（可选）:
-  - 多视角支持完善
-  - CUDA kernel优化
-  - 部署到移动端
-```
+**本章核心目标**：在**3周内**，用PyTorch从零实现一个能跑通真实数据集的3DGS系统。不是调库，而是理解每一行代码为什么存在。
 
 ---
 
-## 二、阶段0：环境准备（2-4小时）
+## 一、实践的本质：你在构建什么？
 
-### 2.1 依赖安装清单
+### 1.1 目标 vs 幻觉
+
+**目标**：一个可运行的3DGS实现，包含：
+- ✅ 数据加载（COLMAP解析）
+- ✅ 高斯初始化（从SfM点云）
+- ✅ 可微渲染（投影+混合）
+- ✅ 训练循环（损失+优化+densify）
+- ✅ 实时推理（<20ms）
+
+**幻觉**：一行代码调通（可能，但你不理解）
+
+**选择**：我们要的是理解，不是黑盒。
+
+---
+
+### 1.2 三阶段学习曲线
+
+```
+阶段1: 跑通（Week 1）
+  - 慢速渲染（O(N·H·W)）无所谓
+  - 无densify也行
+  - 目标：看到图像从噪声变清晰
+
+阶段2: 完整（Week 2）
+  - Tile优化到<100ms
+  - 密度控制工作
+  - 目标：PSNR>25，速度可接受
+
+阶段3: 优化（Week 3）
+  - CUDA kernel融合
+  - float16量化
+  - 目标：<10ms实时
+```
+
+**不要跳阶段**：先跑通再优化。
+
+---
+
+## 二、Axioms：实践设计的公理
+
+### 公理1：增量验证
+
+**每写一个函数，立即验证**：
+- 投影函数 → 打印 mu_2d 范围是否在图像内
+- 渲染函数 → 保存图像，看是否不是全黑
+- 损失函数 → 检查梯度是否非零
+
+**反模式**：写完所有再调试 → 无法定位问题。
+
+---
+
+### 公理2：慢速优先
+
+**先用O(N·H·W)慢速渲染**，确保数学正确，再优化到Tile-based。
+
+**为什么**：
+- Tile-based有索引bug难调试
+- 慢速版每行数学对应公式，易验证
+- 速度可以后天优化，正确性必须优先
+
+---
+
+### 公理3：小数据驱动
+
+**永远用小数据集（<100张图，<10k高斯）开始**：
+- 迭代快（分钟级 vs 小时级）
+- 可视化容易（可以看每张图）
+- 错误代价低（重训练快）
+
+**原则**：在chair数据集上跑通，再到更大场景。
+
+---
+
+## 三、Contradictions：实践中的权衡
+
+### 矛盾1：理论正确 vs 数值稳定
+
+**问题**：
+- Σ投影公式 `J·(R·Σ·Rᵀ)·Jᵀ` 理论上正确
+- 但z接近0时J爆炸，Σ_2d可能非正定
+- 怎么平衡？
+
+**实践方案**：
+```python
+# 1. z clamp (必须)
+z = mu_cam[:, 2].clamp(min=1e-6)
+
+# 2. Σ_2d加正则 (必须)
+Sigma_2d = Sigma_2d + torch.eye(2) * 1e-8
+
+# 3. 特征值裁剪 (可选)
+eigvals = torch.linalg.eigvalsh(Sigma_2d)
+eigvals = eigvals.clamp(min=1e-8)
+```
+
+**口诀**：先clamp，再加epsilon，最后clip特征值。
+
+---
+
+### 矛盾2：PyTorch vs CUDA
+
+**问题**：
+- PyTorch慢（150ms/帧），但易调试
+- CUDA快（5ms/帧），但难写
+
+**实践路径**：
+1. **Week 1-2**: 纯PyTorch（接受慢）
+2. **Week 3**: 用`torch.compile`试试加速
+3. **后续**: 阅读官方CUDA kernel，选择性重写瓶颈
+
+**不要一开始就写CUDA**，除非你有GPU编程经验。
+
+---
+
+### 矛盾3：完整实现 vs 简化
+
+**问题**：
+- 完整3DGS有37个超参数
+- 新手容易 overwhelmed
+
+**解决方案**：**最小可行产品（MVP）清单**
+
+```
+Phase 1 MVP (Week 1):
+  ✅ 数据加载（COLMAP）
+  ✅ 高斯初始化（各向同性）
+  ✅ 慢速渲染（O(N·H·W)）
+  ✅ L1损失（不用SSIM）
+  ✅ 无densify，固定N
+
+Phase 2 MVP (Week 2):
+  ✅ Tile渲染（<100ms）
+  ✅ 预筛选（包围盒）
+  ✅ 早停（α累计）
+  ✅ L1+SSIM
+  ✅ 基础densify（克隆）
+
+Phase 3 MVP (Week 3):
+  ✅ 分裂densify
+  ✅ 学习率调度
+  ✅ 完整prune
+  ✅ float16量化
+```
+
+**每阶段验证通过再进下一阶段**。
+
+---
+
+## 四、Solution Path：3周详细计划
+
+### Week 1：基础框架（目标：看到模糊图像）
+
+#### Day 1-2：环境 + 数据加载
+
+**任务清单**：
+- [ ] 创建conda环境，安装PyTorch
+- [ ] 下载nerf_synthetic/chair数据集
+- [ ] 实现 `colmap_loader.py`（解析cameras.bin, images.bin, points3D.bin）
+- [ ] 实现 `Dataset` 类，返回 (image, camera) 对
+- [ ] 验证：`dataset[0]` 输出合理shape
+
+**验证标准**：
+```python
+dataset = SfMDataset(...)
+img, cam = dataset[0]
+assert img.shape == (3, H, W)
+assert cam['R'].shape == (3,3)
+print("✅ 数据加载就绪")
+```
+
+---
+
+#### Day 3-4：慢速渲染（O(N·H·W)）
+
+**任务清单**：
+- [ ] 实现 `GaussianModel` 初始化（从SfM点云）
+- [ ] 实现 `project_gaussian()`（投影公式）
+- [ ] 实现 `render_slow()`（嵌套循环：像素×高斯）
+- [ ] 可视化第一帧：`plt.imshow(render_slow(gaussians, camera))`
+
+**常见坑**：
+- Σ_2d 计算错误 → 检查 `J @ Sigma_cam @ J.T`
+- 坐标系错误 → 渲染图偏移/颠倒
+- 尺度太小 → 全黑 → `scale_factor *= 10`
+
+**验证标准**：
+- 渲染图不是全黑/全白
+- 有大致轮廓（即使模糊）
+- 颜色基本正确（来自SfM RGB）
+
+---
+
+#### Day 5-6：训练循环（无densify）
+
+**任务清单**：
+- [ ] 实现 `compute_loss()`（L1 + SSIM）
+- [ ] 实现训练循环（前向→损失→反向→更新）
+- [ ] 固定N（不densify/prune）
+- [ ] 每100步保存渲染图
+
+**验证标准**：
+```python
+# 运行100步
+for step in range(100):
+    loss.backward()
+    optimizer.step()
+    if step % 10 == 0:
+        print(f"Step {step}: loss={loss.item():.4f}")
+# loss应该下降
+```
+
+**如果loss不下降**：
+- 检查梯度：`gaussians.mu.grad.norm()` > 0?
+- 检查LR：太大→NaN，太小→不动
+- 检查渲染：是否输出有意义图像？
+
+---
+
+#### Day 7：Week 1验收
+
+**目标**：
+- 训练1000步，PSNR从0提升到15+
+- 渲染图有基本结构
+
+**如果失败**：
+- 回到Day 4，检查渲染质量
+- 可能scale_factor不对（调大10倍）
+
+---
+
+### Week 2：完整流程（目标：PSNR>25，速度<100ms）
+
+#### Day 1-2：Tile预筛选
+
+**任务清单**：
+- [ ] 实现 `compute_bbox()`（高斯包围盒）
+- [ ] 实现 `assign_gaussians_to_tiles()`（倒排索引）
+- [ ] 实现 `render_tiled()`（每tile独立）
+- [ ] 对比慢速版和tile版输出差异（应<1e-3）
+
+**性能目标**：
+- N=50k，H=800，W=600
+- 慢速：~5s/帧
+- Tile：<100ms/帧（50×加速）
+
+**调试技巧**：
+- 先跑tile版，但每个tile仍遍历所有像素（验证索引正确）
+- 再跑完整tile（每个像素只遍历tile内高斯）
+
+---
+
+#### Day 3-4：密度控制（Densify）
+
+**任务清单**：
+- [ ] 实现 `densify_and_prune()`（克隆+分裂）
+- [ ] 每1000步缓存梯度（`grads_mu = mu.grad.norm(dim=1)`）
+- [ ] 实现分裂：特征值分解 + 沿主方向分裂
+- [ ] 实现克隆：直接复制
+- [ ] 验证：N从10k增长到50k
+
+**关键参数**：
+- `grad_threshold = 0.0002`
+- `scale_threshold = 0.01`（像素）
+- `densify_interval = 1000`
+- `densify_from = 500`
+
+**如果densify不触发**：
+- 检查 `radii` 是否>threshold（可能scale_factor太小）
+- 检查梯度是否>threshold（可能LR太小）
+
+---
+
+#### Day 5：完整训练（30k步）
+
+**任务清单**：
+- [ ] 集成所有组件
+- [ ] 实现学习率调度（7500, 15000步 ×0.1）
+- [ ] 运行完整训练（30k步）
+- [ ] 监控：PSNR曲线、N增长曲线
+
+**预期结果**（chair数据集）：
+- 初始PSNR：10-15
+- 10k步：25-28
+- 30k步：30-32
+- N：10k → 100k-300k
+
+**如果PSNR卡住**：
+- 检查densify是否工作（N是否增长）
+- 检查损失是否包含梯度项（L1+SSIM）
+- 尝试降低 `grad_threshold`（更激进densify）
+
+---
+
+#### Day 6-7：评估与调参
+
+**任务清单**：
+- [ ] 在测试集评估（10张图）
+- [ ] 可视化对比（GT vs 渲染）
+- [ ] 保存最终模型（gaussians.pt）
+- [ ] 尝试不同scale_factor（0.5, 1.0, 2.0）
+- [ ] 尝试不同grad_threshold（0.0001, 0.0002, 0.0005）
+
+**验收标准**：
+- PSNR(test) > 25
+- 渲染图无大空洞
+- 速度 < 100ms/帧
+
+---
+
+### Week 3：优化与部署（可选）
+
+#### Day 1-2：推理优化
+
+**任务清单**：
+- [ ] 实现 `InferenceState`（缓存排序）
+- [ ] 关闭autograd（`with torch.no_grad()`）
+- [ ] float16量化（`gaussians.half()`）
+- [ ] 测试延迟：<20ms？
+
+---
+
+#### Day 3-4：CUDA kernel（进阶）
+
+**如果时间充裕**：
+- [ ] 阅读官方CUDA kernel
+- [ ] 用`torch.compile`试试
+- [ ] 选择性重写投影部分
+
+---
+
+#### Day 5-7：自己的数据
+
+**任务清单**：
+- [ ] 用手机拍50-100张场景
+- [ ] COLMAP SfM处理
+- [ ] 3DGS训练
+- [ ] 实时渲染展示
+
+---
+
+## 五、调试哲学：如何快速定位问题
+
+### 5.1 分层验证法
+
+```
+数据加载层
+  ↓ 验证：dataset[0]输出合理
+  └─失败 → 检查COLMAP路径、图像读取
+
+初始化层
+  ↓ 验证：gaussians.N > 0, scales.mean() > 0
+  └─失败 → 检查尺度估计（重投影误差计算）
+
+渲染层
+  ↓ 验证：render_slow() 有图像轮廓
+  └─失败 → 检查投影公式（mu_2d范围、Sigma_2d特征值）
+
+训练层
+  ↓ 验证：100步内loss下降
+  └─失败 → 检查梯度（mu.grad.norm()）、LR
+```
+
+---
+
+### 5.2 症状速查表
+
+```
++------------+----------+----------+----------+
+| 症状       | 优先级   | 可能原因 | 快速检查 |
++------------+----------+----------+----------+
+| 全黑/全白  | 高       | Σ太小/大 | scales.mean() |
+| 偏移/颠倒  | 高       | 坐标系错 | 渲染vs GT对比 |
+| loss NaN   | 高       | Σ奇异    | torch.det(Sigma) |
+| 梯度为0    | 中       | 高斯"死" | mu.grad.norm() |
+| 不收敛     | 中       | LR不对   | 尝试LR×10或÷10 |
+| 速度慢     | 低       | 未优化   | 检查是否tile版 |
++------------+----------+----------+----------+
+```
+
+---
+
+### 5.3 可视化驱动
+
+**必须保存的中间结果**：
+```python
+# 每100步保存
+if step % 100 == 0:
+    # 1. 渲染图
+    save_image(rendered, f"output/step_{step:06d}.png")
+    
+    # 2. 投影中心分布
+    plt.scatter(mu_2d[:,0].cpu(), mu_2d[:,1].cpu(), s=1)
+    plt.savefig(f"output/centers_{step:06d}.png")
+    
+    # 3. 尺度分布
+    scales = gaussians.get_scales().max(dim=1)[0]
+    plt.hist(scales.cpu().numpy(), bins=50)
+    plt.savefig(f"output/scales_{step:06d}.png")
+```
+
+**看图的直觉**：
+- 渲染图：从噪声→模糊→清晰
+- 投影中心：从随机→聚集→匹配GT结构
+- 尺度分布：从集中→分散（densify工作）
+
+---
+
+## 六、关键函数参考实现
+
+### 6.1 完整 `render_tiled()` 框架
+
+```python
+def render_tiled(gaussians, camera, H, W, tile_size=16):
+    with torch.no_grad():
+        # 1. 投影
+        mu_2d, Sigma_2d, depth = project_gaussian(
+            gaussians.mu, gaussians.Sigma,
+            camera['R'], camera['T'], camera['K']
+        )
+        
+        # 2. 排序
+        indices = torch.argsort(depth, descending=True)
+        mu_2d = mu_2d[indices]
+        Sigma_2d = Sigma_2d[indices]
+        alpha = gaussians.alpha[indices]
+        color = gaussians.color[indices]
+        
+        # 3. 包围盒
+        bbox_min, bbox_max = compute_bbox(mu_2d, Sigma_2d)
+        
+        # 4. Tile映射
+        tile_mapping = assign_gaussians_to_tiles(
+            bbox_min, bbox_max, tile_size, W, H
+        )
+        
+        # 5. 渲染
+        image = torch.zeros((3, H, W), device=gaussians.mu.device)
+        accum_alpha = torch.zeros((1, H, W), device=gaussians.mu.device)
+        
+        n_tiles_x = (W + tile_size - 1) // tile_size
+        
+        for tile_id, g_indices in enumerate(tile_mapping):
+            if not g_indices:
+                continue
+            
+            ty = tile_id // n_tiles_x
+            tx = tile_id % n_tiles_x
+            x0, x1 = tx*tile_size, min((tx+1)*tile_size, W)
+            y0, y1 = ty*tile_size, min((ty+1)*tile_size, H)
+            
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    pixel = torch.tensor([x, y], device=gaussians.mu.device)
+                    for g_idx in g_indices:
+                        # 计算高斯值
+                        diff = pixel - mu_2d[g_idx]
+                        inv_Sigma = torch.linalg.inv(Sigma_2d[g_idx])
+                        exponent = -0.5 * (diff @ inv_Sigma @ diff)
+                        g_val = alpha[g_idx] * torch.exp(exponent)
+                        
+                        # Alpha blending
+                        contrib = g_val * color[g_idx] * (1 - accum_alpha[:, y, x])
+                        image[:, y, x] += contrib.squeeze()
+                        accum_alpha[:, y, x] += g_val
+                        
+                        if accum_alpha[0, y, x] >= 0.99:
+                            break
+        
+        return image
+```
+
+---
+
+## 七、Week 1快速启动脚本
 
 ```bash
-# 1. 创建conda环境
+#!/bin/bash
+# setup.sh
+
 conda create -n 3dgs python=3.10 -y
 conda activate 3dgs
 
-# 2. 安装PyTorch（根据CUDA）
-# GPU (CUDA 11.8):
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-# CPU:
-conda install pytorch torchvision torchaudio cpuonly -c pytorch
+# PyTorch (CUDA 11.8)
+conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia -y
 
-# 3. 核心依赖
-pip install tqdm opencv-python matplotlib numpy imageio scikit-image
+# 依赖
+pip install tqdm opencv-python matplotlib numpy imageio scikit-image pycolmap
 
-# 4. 评估指标（可选）
-pip install lpips torchmetrics
+# 数据
+mkdir -p data/nerf_synthetic
+wget -O data/nerf_synthetic.zip https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/dataset/nerf_synthetic.zip
+unzip data/nerf_synthetic.zip -d data/
 
-# 5. COLMAP Python接口（可选，用于SfM）
-pip install pycolmap
+echo "✅ 环境就绪，开始Day 1"
 ```
 
 ---
 
-### 2.2 数据集准备
+## 八、最终检查清单
 
-**快速开始**: nerf_synthetic（100张图，适合调试）
+### 8.1 代码完整性
 
-```bash
-wget https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/dataset/nerf_synthetic.zip
-unzip nerf_synthetic.zip -d data/
-
-# 结构
-data/nerf_synthetic/chair/
-├── train/      # 100张训练图
-├── test/       # 100张测试图
-└── transforms.json
 ```
-
-**用自己的数据**:
-```bash
-# COLMAP SfM
-colmap feature_extractor --database_path db/ --image_path images/
-colmap exhaustive_matcher --database_path db/
-colmap mapper --database_path db/ --image_path images/ --output_path sparse/
+[ ] colmap_loader.py: 解析COLMAP输出
+[ ] dataset.py: SfMDataset类
+[ ] gaussian.py: GaussianModel类
+[ ] projection.py: project_gaussian()
+[ ] render_slow.py: 慢速渲染
+[ ] render_tiled.py: Tile渲染
+[ ] losses.py: compute_loss()
+[ ] train.py: 完整训练循环
+[ ] eval.py: 测试集评估
 ```
 
 ---
 
-## 三、阶段1：数据加载（6-8小时）
-
-### 3.1 模块结构
+### 8.2 功能验证
 
 ```
-project/
-├── utils/
-│   └── colmap_loader.py   # COLMAP解析
-├── data/
-│   └── dataset.py         # Dataset类
-└── config.yaml            # 配置文件
-```
-
----
-
-### 3.2 COLMAP解析器
-
-```python
-# utils/colmap_loader.py
-import numpy as np
-import pycolmap
-
-def load_sfm_reconstruction(sparse_path):
-    """加载COLMAP reconstruction"""
-    return pycolmap.Reconstruction(str(sparse_path))
-
-def build_K(camera):
-    """从pycolmap.Camera构建K矩阵"""
-    if camera.model == "PINHOLE":
-        fx, fy, cx, cy = camera.params
-    elif camera.model == "SIMPLE_PINHOLE":
-        fx, cx, cy = camera.params
-        fy = fx
-    else:
-        raise NotImplementedError(camera.model)
-    
-    return np.array([[fx, 0, cx],
-                     [0, fy, cy],
-                     [0,  0,  1]])
-
-def qvec2rotmat(qvec):
-    """四元数(w,x,y,z) → 旋转矩阵"""
-    w, x, y, z = qvec
-    return np.array([
-        [1-2*y*y-2*z*z, 2*x*y-2*w*z, 2*x*z+2*w*y],
-        [2*x*y+2*w*z, 1-2*x*x-2*z*z, 2*y*z-2*w*x],
-        [2*x*z-2*w*y, 2*y*z+2*w*x, 1-2*x*x-2*y*y]
-    ])
+[ ] 数据加载：dataset[0]返回正确shape
+[ ] 初始化：gaussians.N > 0, scales合理
+[ ] 慢速渲染：图像有轮廓
+[ ] 训练100步：loss下降
+[ ] Tile渲染：速度<100ms
+[ ] Densify：N增长
+[ ] 完整训练：PSNR>25
+[ ] 推理：<20ms延迟
 ```
 
 ---
 
-### 3.3 Dataset类
+### 8.3 性能基准
 
-```python
-# data/dataset.py
-from torch.utils.data import Dataset
-from PIL import Image
-import torch
-
-class SfMDataset(Dataset):
-    def __init__(self, sparse_path, image_path, split='train', scale=1.0):
-        self.recon = load_sfm_reconstruction(sparse_path)
-        self.image_path = Path(image_path)
-        self.scale = scale
-        
-        all_images = list(self.recon.images.values())
-        split_idx = int(0.8 * len(all_images))
-        self.images = all_images[:split_idx] if split=='train' else all_images[split_idx:]
-        
-        self.points3d = list(self.recon.points3D.values())
-    
-    def __len__(self):
-        return len(self.images)
-    
-    def __getitem__(self, idx):
-        img = self.images[idx]
-        camera = self.recon.cameras[img.camera_id]
-        
-        # 1. 图像
-        img_file = self.image_path / img.name
-        image = Image.open(img_file).convert("RGB")
-        if self.scale != 1.0:
-            new_size = (int(image.width*self.scale), int(image.height*self.scale))
-            image = image.resize(new_size, Image.LANCZOS)
-        image = torch.from_numpy(np.array(image)/255.0).float().permute(2,0,1)
-        
-        # 2. 相机
-        K = build_K(camera)
-        R = qvec2rotmat(img.qvec)
-        T = img.tvec
-        
-        if self.scale != 1.0:
-            K[:2] *= self.scale
-        
-        return image, {
-            'R': torch.tensor(R, dtype=torch.float32),
-            'T': torch.tensor(T, dtype=torch.float32),
-            'K': torch.tensor(K, dtype=torch.float32),
-            'width': int(camera.width * self.scale),
-            'height': int(camera.height * self.scale)
-        }
+```
++----------------+--------+--------+
+| 指标           | 目标   | 实测   |
++----------------+--------+--------+
+| 训练时间       | 30分钟 |        |
+| 推理延迟       | <20ms  |        |
+| 内存占用       | <200MB |        |
+| PSNR (test)    | >25    |        |
++----------------+--------+--------+
 ```
 
 ---
 
-## 四、阶段2：高斯初始化（4-6小时）
+## 九、如果卡住了：重启检查点
 
-### 4.1 GaussianModel类
+### 9.1 Week 1失败
 
-```python
-# gaussian/gaussian.py
-import torch
+**症状**：Day 4慢速渲染出不了图
 
-class GaussianModel:
-    def __init__(self, points3d, cameras, images, device='cuda'):
-        self.device = torch.device(device)
-        self.N = len(points3d)
-        
-        # 初始化参数
-        self.mu = torch.zeros((self.N, 3), device=self.device)
-        self.Sigma = torch.zeros((self.N, 3, 3), device=self.device)
-        self.alpha = torch.full((self.N, 1), 0.5, device=self.device)
-        self.color = torch.zeros((self.N, 3), device=self.device)
-        
-        # 逐点赋值
-        for i, p in enumerate(points3d):
-            self.mu[i] = torch.tensor(p.xyz, device=self.device)
-            self.color[i] = torch.tensor(p.rgb/255.0, device=self.device)
-        
-        # 尺度估计（从重投影误差）
-        self._estimate_scales(points3d, cameras, images)
-        
-        # 初始化协方差
-        scales = self.get_scales()
-        for i in range(self.N):
-            s = scales[i].clamp(min=1e-6)
-            self.Sigma[i] = torch.diag(s**2)
-    
-    def _estimate_scales(self, points3d, cameras, images, factor=0.5):
-        """从重投影误差估计尺度"""
-        scales = []
-        for p in points3d:
-            errors = []
-            for track in p.track:
-                img = images[track.image_id]
-                cam = cameras[img.camera_id]
-                R = torch.from_numpy(qvec2rotmat(img.qvec)).float()
-                T = torch.from_numpy(img.tvec).float()
-                K = torch.from_numpy(build_K(cam)).float()
-                
-                X_cam = R @ torch.tensor(p.xyz) + T
-                proj = K @ X_cam
-                proj = proj[:2] / proj[2]
-                err = torch.norm(proj - torch.tensor(track.point2D))
-                errors.append(err.item())
-            
-            scale = np.median(errors) if errors else 0.01
-            scales.append(scale * factor)
-        
-        self.scale_init = torch.tensor(scales, device=self.device)
-    
-    def get_scales(self):
-        eigvals = torch.linalg.eigvalsh(self.Sigma)
-        return torch.sqrt(eigvals)
-```
+**检查顺序**：
+1. 渲染是不是全黑？→ scale_factor调大10倍
+2. 渲染是不是全白？→ alpha调至0.3，scale_factor调小
+3. 图像偏移？→ 检查坐标系转换（R/T符号）
+4. 条纹伪影？→ Sigma加正则 `+ I·1e-8`
 
 ---
 
-## 五、阶段3：投影与渲染（8-10小时）
+### 9.2 Week 2失败
 
-### 5.1 投影函数
+**症状**：训练1000步PSNR<20
 
-```python
-# rendering/projection.py
-def project_gaussian(mu, Sigma, R, T, K):
-    """3D高斯 → 2D投影"""
-    # 1. 相机坐标系
-    mu_cam = (R @ mu.T).T + T[None, :]
-    depth = mu_cam[:, 2].clone()
-    
-    # 2. 投影中心
-    mu_hom = (K @ mu_cam.T).T
-    mu_2d = mu_hom[:, :2] / mu_hom[:, 2:3]
-    
-    # 3. 投影协方差
-    Sigma_cam = R @ Sigma @ R.T
-    
-    z = mu_cam[:, 2].clamp(min=1e-6)
-    J = torch.zeros((mu.shape[0], 2, 3), device=mu.device)
-    J[:, 0, 0] = K[0, 0] / z
-    J[:, 0, 2] = -K[0, 0] * mu_cam[:, 0] / (z**2)
-    J[:, 1, 1] = K[1, 1] / z
-    J[:, 1, 2] = -K[1, 1] * mu_cam[:, 1] / (z**2)
-    
-    Sigma_2d = J @ Sigma_cam @ J.transpose(1, 2)
-    Sigma_2d = Sigma_2d + torch.eye(2, device=mu.device)[None,:,:] * 1e-8
-    
-    return mu_2d, Sigma_2d, depth
-```
+**可能原因**：
+- Densify没工作 → N没增长 → grad_threshold太高？
+- LR不对 → loss不下降 → 尝试LR×10或÷10
+- 初始化太差 → scale_factor不对 → 回到Week 1调
 
 ---
 
-### 5.2 慢速渲染（调试用）
+### 9.3 Week 3失败
 
-```python
-def render_slow(gaussians, camera, H, W):
-    """O(N·H·W)慢速版，仅调试验证"""
-    mu_2d, Sigma_2d, depth = project_gaussian(
-        gaussians.mu, gaussians.Sigma,
-        camera['R'], camera['T'], camera['K']
-    )
-    
-    indices = torch.argsort(depth, descending=True)
-    mu_2d = mu_2d[indices]
-    Sigma_2d = Sigma_2d[indices]
-    alpha = gaussians.alpha[indices]
-    color = gaussians.color[indices]
-    
-    image = torch.zeros((3, H, W), device=gaussians.mu.device)
-    accum_alpha = torch.zeros((1, H, W), device=gaussians.mu.device)
-    
-    y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-    pixels = torch.stack([x.float(), y.float()], dim=-1)
-    
-    for i in range(len(gaussians)):
-        diff = pixels - mu_2d[i]
-        inv_Sigma = torch.linalg.inv(Sigma_2d[i])
-        exponent = -0.5 * (diff @ inv_Sigma * diff).sum(dim=2)
-        g_val = alpha[i] * torch.exp(exponent)
-        
-        contrib = g_val[None,:,:] * color[i][:,None,None] * (1 - accum_alpha)
-        image += contrib
-        accum_alpha += g_val[None,:,:]
-        
-        if accum_alpha.max() > 0.99:
-            break
-    
-    return image
-```
+**症状**：Tile渲染速度不升反降
+
+**检查**：
+- 是不是用了慢速版代码？
+- Tile映射是否正确（每个像素只遍历tile内高斯）？
+- 用`torch.cuda.synchronize()`准确计时
 
 ---
 
-## 六、阶段4：训练循环（6-8小时）
+## 十、现在，开始烧起来吧！🔥
 
-### 6.1 损失函数
+**记住**：
+1. **先跑通，再优化**：慢速版能出图比优化但跑不通重要
+2. **小数据驱动**：chair数据集<100张图，迭代快
+3. **可视化驱动**：每100步保存渲染图，用眼睛判断
+4. **增量验证**：每写一个函数立即测试
 
-```python
-def ms_ssim_loss(pred, target):
-    C1 = 0.01**2; C2 = 0.03**2
-    mu_pred = F.avg_pool2d(pred, 3, 1, 1)
-    mu_target = F.avg_pool2d(target, 3, 1, 1)
-    sigma_pred = F.avg_pool2d(pred**2, 3, 1, 1) - mu_pred**2
-    sigma_target = F.avg_pool2d(target**2, 3, 1, 1) - mu_target**2
-    sigma_cross = F.avg_pool2d(pred*target, 3, 1, 1) - mu_pred*mu_target
-    ssim = ((2*mu_pred*mu_target+C1)*(2*sigma_cross+C2)) / \
-           ((mu_pred**2+mu_target**2+C1)*(sigma_pred+sigma_target+C2))
-    return 1 - ssim.mean()
+**3周后**，你将拥有：
+- ✅ 完整的3DGS实现（3000+行）
+- ✅ 对每一行代码的理解
+- ✅ 调试复杂问题的能力
+- ✅ 可扩展的代码框架
 
-def compute_loss(rendered, gt, gaussians, λ_ssim=0.8, λ_scale=0.01):
-    L1 = F.l1_loss(rendered, gt)
-    L_ssim = ms_ssim_loss(rendered, gt)
-    L_img = (1-λ_ssim)*L1 + λ_ssim*L_ssim
-    
-    scales = gaussians.get_scales()
-    L_scale = torch.clamp(scales - 1.0, min=0).mean()
-    
-    return L_img + λ_scale*L_scale, L1, L_ssim
-```
+**这比任何调库都珍贵。**
 
 ---
 
-## 七、阶段5：密度控制（8-10小时）
-
-### 7.1 Densify & Prune实现
-
-```python
-def densify_and_prune(gaussians, optimizer, radii,
-                      grads_mu, grads_Sigma,
-                      grad_thresh=0.0002, scale_thresh=0.01,
-                      prune_alpha=0.001, max_gaussians=2e6):
-    with torch.no_grad():
-        # Densify
-        large_scale = radii > scale_thresh
-        large_grad = (grads_mu > grad_thresh) | (grads_Sigma > grad_thresh)
-        to_densify = large_scale & large_grad
-        
-        if to_densify.any():
-            new_mu = gaussians.mu[to_densify].clone()
-            new_Sigma = gaussians.Sigma[to_densify].clone()
-            new_alpha = gaussians.alpha[to_densify].clone()
-            new_color = gaussians.color[to_densify].clone()
-            
-            gaussians.mu = torch.cat([gaussians.mu, new_mu])
-            gaussians.Sigma = torch.cat([gaussians.Sigma, new_Sigma])
-            gaussians.alpha = torch.cat([gaussians.alpha, new_alpha])
-            gaussians.color = torch.cat([gaussians.color, new_color])
-            gaussians.N = len(gaussians)
-            
-            # 优化器添加参数
-            optimizer.add_param_group({'params': new_mu, 'lr': 1.6e-4})
-            optimizer.add_param_group({'params': new_Sigma, 'lr': 1e-3})
-            optimizer.add_param_group({'params': new_alpha, 'lr': 5e-2})
-            optimizer.add_param_group({'params': new_color, 'lr': 5e-3})
-        
-        # Prune
-        scales = gaussians.get_scales().max(dim=1)[0]
-        to_prune = (gaussians.alpha.squeeze() < prune_alpha) | (scales < 1e-6)
-        
-        if to_prune.any():
-            keep = ~to_prune
-            gaussians.mu = gaussians.mu[keep]
-            gaussians.Sigma = gaussians.Sigma[keep]
-            gaussians.alpha = gaussians.alpha[keep]
-            gaussians.color = gaussians.color[keep]
-            gaussians.N = len(gaussians)
-        
-        # 上限
-        if len(gaussians) > max_gaussians:
-            keep = torch.randperm(len(gaussians))[:int(max_gaussians)]
-            gaussians.mu = gaussians.mu[keep]
-            gaussians.Sigma = gaussians.Sigma[keep]
-            gaussians.alpha = gaussians.alpha[keep]
-            gaussians.color = gaussians.color[keep]
-            gaussians.N = len(gaussians)
-```
-
----
-
-## 八、阶段6：Tile优化（8-12小时）
-
-### 8.1 Tile渲染实现
-
-```python
-def compute_bbox(mu_2d, Sigma_2d, scale=3.0):
-    eigvals = torch.linalg.eigvalsh(Sigma_2d)
-    radii = scale * torch.sqrt(eigvals.max(dim=1)[0])
-    bbox_min = (mu_2d - radii[:,None]).long().clamp(min=0)
-    bbox_max = (mu_2d + radii[:,None]).long()
-    return bbox_min, bbox_max
-
-def assign_gaussians_to_tiles(bbox_min, bbox_max, tile_size=16, W=800, H=600):
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles = n_tiles_x * n_tiles_y
-    
-    tile_mapping = [[] for _ in range(n_tiles)]
-    
-    for g_idx in range(len(bbox_min)):
-        x0, y0 = bbox_min[g_idx]
-        x1, y1 = bbox_max[g_idx]
-        tile_x0, tile_x1 = x0 // tile_size, x1 // tile_size
-        tile_y0, tile_y1 = y0 // tile_size, y1 // tile_size
-        
-        for ty in range(tile_y0, tile_y1+1):
-            for tx in range(tile_x0, tile_x1+1):
-                tile_id = ty * n_tiles_x + tx
-                if 0 <= tile_id < len(tile_mapping):
-                    tile_mapping[tile_id].append(g_idx)
-    
-    return tile_mapping
-
-def render_tiled(gaussians, sorted_indices, mu_2d, Sigma_2d, tile_mapping, H, W):
-    image = torch.zeros((3, H, W), device=gaussians.mu.device)
-    accum_alpha = torch.zeros((1, H, W), device=gaussians.mu.device)
-    tile_size = 16
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    
-    for tile_id, g_indices in enumerate(tile_mapping):
-        if not g_indices:
-            continue
-        
-        ty = tile_id // n_tiles_x
-        tx = tile_id % n_tiles_x
-        x0, x1 = tx*tile_size, min((tx+1)*tile_size, W)
-        y0, y1 = ty*tile_size, min((ty+1)*tile_size, H)
-        
-        for y in range(y0, y1):
-            for x in range(x0, x1):
-                pixel = torch.tensor([x, y], device=gaussians.mu.device)
-                for g_idx in g_indices:
-                    g_idx_sorted = sorted_indices[g_idx]
-                    mu_i = mu_2d[g_idx_sorted]
-                    Sigma_i = Sigma_2d[g_idx_sorted]
-                    alpha_i = gaussians.alpha[g_idx_sorted]
-                    color_i = gaussians.color[g_idx_sorted]
-                    
-                    diff = pixel - mu_i
-                    inv_Sigma = torch.linalg.inv(Sigma_i)
-                    exponent = -0.5 * (diff @ inv_Sigma @ diff)
-                    g_val = alpha_i * torch.exp(exponent)
-                    
-                    contrib = g_val * color_i * (1 - accum_alpha[:, y, x])
-                    image[:, y, x] += contrib.squeeze()
-                    accum_alpha[:, y, x] += g_val
-                    
-                    if accum_alpha[0, y, x] >= 0.99:
-                        break
-    
-    return image
-```
-
----
-
-## 九、阶段7：完整训练与评估
-
-### 9.1 完整训练脚本
-
-```python
-# train_full.py
-total_steps = 30000
-densify_interval = 1000
-densify_from = 500
-prune_from = 15000
-
-optimizer = torch.optim.Adam([
-    {'params': gaussians.mu, 'lr': 1.6e-4},
-    {'params': gaussians.Sigma, 'lr': 1e-3},
-    {'params': gaussians.alpha, 'lr': 5e-2},
-    {'params': gaussians.color, 'lr': 5e-3}
-])
-
-dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
-data_iter = iter(dataloader)
-
-for step in range(total_steps):
-    try:
-        gt_image, camera = next(data_iter)
-    except StopIteration:
-        data_iter = iter(dataloader)
-        gt_image, camera = next(data_iter)
-    
-    gt_image = gt_image[0].cuda()
-    camera = {k: v[0].cuda() for k, v in camera.items()}
-    
-    # 渲染
-    rendered, radii = render_tiled(gaussians, camera, camera['height'], camera['width'])
-    
-    # 损失
-    loss, L1, L_ssim = compute_loss(rendered, gt_image, gaussians)
-    
-    # 反向
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    
-    # 缓存梯度
-    if step % densify_interval == 0:
-        grads_mu = gaussians.mu.grad.detach().norm(dim=1)
-        grads_Sigma = gaussians.Sigma.grad.detach().view(gaussians.N, -1).norm(dim=1)
-    
-    # 密度控制
-    if step % densify_interval == 0:
-        if densify_from <= step < prune_from:
-            densify_and_prune(gaussians, optimizer, radii, grads_mu, grads_Sigma)
-        elif step >= prune_from:
-            densify_and_prune(gaussians, optimizer, radii, grads_mu, grads_Sigma, prune_alpha=0.001)
-    
-    # 学习率调度
-    if step in [7500, 15000]:
-        for g in optimizer.param_groups:
-            g['lr'] *= 0.1
-    
-    # 日志
-    if step % 100 == 0:
-        psnr = 10 * np.log10(1.0 / L1.item())
-        print(f"Step {step:06d}: loss={loss:.4f}, PSNR={psnr:.2f}, "
-              f"#gauss={len(gaussians)}, lr={optimizer.param_groups[0]['lr']:.2e}")
-    
-    if step % 1000 == 0:
-        save_image(rendered, f"output/step_{step:06d}.png")
-```
-
----
-
-## 十、调试检查清单
-
-### 10.1 阶段性验证
-
-```
-+----------+----------------+----------------------------------+
-| 阶段     | 检查点         | 通过标准                         |
-+----------+----------------+----------------------------------+
-| 数据加载 | dataset[0]     | 返回合理tensor                   |
-| 初始化   | gaussians.N    | 1k-50k                          |
-| 慢速渲染 | render_slow()  | 不是全黑/全白                    |
-| 训练100步| loss下降       | loss从1.0→0.5                   |
-| Densify  | N增长          | 从10k→50k                       |
-| Tile优化 | 单帧<100ms     | time.time()测量                  |
-| 完整训练 | PSNR>25        | 测试集评估                       |
-+----------+----------------+----------------------------------+
-```
-
----
-
-### 10.2 常见问题速查
-
-```
-+--------+----------+------+----------+
-| 症状   | 原因     | 检查 | 解决     |
-+--------+----------+------+----------+
-| 全黑   | Σ太小    | Sigma.diag().mean() | scale_factor×5-10 |
-| 全白   | α太大    | alpha.mean() | α调至0.3 |
-| 梯度0  | 高斯"死" | mu.grad.norm() | 增大α初始值 |
-| 条纹   | Σ奇异    | torch.det(Sigma) | Σ正则化 |
-| 不收敛 | LR太高   | loss NaN | 所有LR÷10 |
-+--------+----------+------+----------+
-```
-
----
-
-## 十一、后续学习路径
-
-完成基础实现后：
-
-1. **阅读官方代码**（https://github.com/graphdeco-inria/gaussian-splatting）
-   - 对比实现差异
-   - 学习CUDA kernel优化
-
-2. **尝试扩展**（第9章）
-   - 动态场景
-   - 压缩量化
-   - 几何约束
-
-3. **应用到自己的数据**
-   - 手机拍摄场景
-   - COLMAP处理 → 3DGS训练
-   - 实时渲染展示
-
----
-
-## 十二、最后提醒
-
-- ✅ **先跑通，再优化**: 慢速版能出图比优化但跑不通重要
-- ✅ **小数据开始**: nerf_synthetic/chair（100张图）
-- ✅ **可视化驱动**: 每100步保存渲染图
-- ✅ **梯度监控**: 确保 `mu.grad.norm() > 0`
-- ✅ **参考官方**: 但先自己写
-
----
-
-**现在，去烧起来吧！🔥**
-
----
-
-**附录：文件结构**
+**附录A：完整项目结构**
 
 ```
 3dgs_implementation/
-├── config.yaml
-├── train.py
-├── render.py
-├── eval.py
+├── config.yaml              # 超参数配置
+├── train.py                 # 训练入口
+├── render.py                # 推理入口
+├── eval.py                  # 评估脚本
+├── setup.sh                 # 环境配置
 ├── utils/
-│   ├── colmap_loader.py
-│   └── camera.py
+│   ├── __init__.py
+│   ├── colmap_loader.py    # COLMAP解析
+│   ├── camera.py           # 相机工具
+│   └── image.py            # 图像保存
 ├── data/
-│   ├── dataset.py
-│   └── __init__.py
+│   ├── __init__.py
+│   └── dataset.py          # SfMDataset
 ├── gaussian/
 │   ├── __init__.py
-│   └── gaussian.py
+│   └── gaussian.py         # GaussianModel
 ├── rendering/
 │   ├── __init__.py
-│   ├── projection.py
-│   ├── render_slow.py
-│   ├── render_tiled.py
-│   └── losses.py
+│   ├── projection.py       # 投影函数
+│   ├── render_slow.py      # 慢速渲染
+│   ├── render_tiled.py     # Tile渲染
+│   └── losses.py           # 损失函数
 └── output/
     ├── step_000000.png
     ├── step_001000.png
     └── ...
 ```
+
+---
+
+**附录B：关键超参数速查**
+
+```yaml
+# config.yaml
+total_steps: 30000
+densify_interval: 1000
+densify_from: 500
+prune_from: 15000
+grad_threshold: 0.0002
+scale_threshold: 0.01  # 像素
+scale_factor: 0.5      # 初始化尺度系数
+lambda_ssim: 0.8
+lambda_scale: 0.01
+lr_mu: 1.6e-4
+lr_Sigma: 1e-3
+lr_alpha: 5e-2
+lr_color: 5e-3
+```
+
+---
+
+**附录C：典型时间预算**（RTX 4090, chair数据集）
+
+```
+Week 1 (nerf_synthetic/chair, 100张图, ~10k高斯):
+  数据加载: 5分钟
+  慢速渲染: 2s/帧（调试用）
+  训练1000步: 30分钟（无densify）
+
+Week 2 (完整流程):
+  训练30k步: 30-60分钟
+  Tile渲染: 10-20ms/帧
+
+Week 3 (优化):
+  float16量化: 推理<10ms
+  CUDA编译: 额外2-3天学习成本
+```
+
+---
+
+**最后一句**：遇到问题先搜，再问。但记住——**理解为什么**比**得到答案**重要100倍。
+
+现在，开始写你的第一行代码。
