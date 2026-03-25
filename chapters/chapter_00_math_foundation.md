@@ -102,11 +102,13 @@ gaussian = {
 
 #### 核心概念诞生：协方差矩阵
 
-```math
-Σ = [σ_xx  σ_xy  σ_xz]   # 3×3 对称正定矩阵
-    [σ_yx  σ_yy  σ_yz]   
-    [σ_zx  σ_zy  σ_zz]
-```
+$$
+\Sigma = \begin{bmatrix} 
+\sigma_{xx} & \sigma_{xy} & \sigma_{xz} \\  
+\sigma_{yx} & \sigma_{yy} & \sigma_{yz} \\   
+\sigma_{zx} & \sigma_{zy} & \sigma_{zz}
+\end{bmatrix} \quad \text{(3×3 对称正定矩阵)}
+$$
 
 **为什么是矩阵？**——因为它天然支持线性变换。
 
@@ -114,9 +116,9 @@ gaussian = {
 
 如果要把椭球用旋转矩阵 `R` 转一下，新协方差是：
 
-```math
-Σ' = R · Σ · R^T
-```
+$$
+\Sigma' = R \cdot \Sigma \cdot R^T
+$$
 
 就这么简单。**没有欧拉角的复杂转换，直接三次矩阵乘法**。
 
@@ -148,9 +150,9 @@ gaussian = {
 
 答案是：**特征值分解（Eigen Decomposition）**。
 
-```math
-Σ = V · Λ · V^T
-```
+$$
+\Sigma = V \cdot \Lambda \cdot V^T
+$$
 
 其中：
 - `Λ = diag(λ₁, λ₂, λ₃)` —— **特征值是半轴长度的平方**
@@ -286,8 +288,8 @@ loss(μ)
 
 但 `mu` 是三维的 `(x, y, z)`。这时候需要**偏导数**：
 
-```math
-∇loss = [∂loss/∂x, ∂loss/∂y, ∂loss/∂z]
+$$
+\nabla \text{loss} = \left[ \frac{\partial \text{loss}}{\partial x}, \frac{\partial \text{loss}}{\partial y}, \frac{\partial \text{loss}}{\partial z} \right]
 ```
 
 **梯度的几何意义**：损失函数上升最快的方向（梯度下降就是往反方向走）。
@@ -323,15 +325,15 @@ mu → projected_mu_2d → rendered_image → loss
 怎么求 `∂loss/∂mu`？
 
 **链式法则**：
-```math
-∂loss/∂mu = ∂loss/∂rendered × ∂rendered/∂projected × ∂projected/∂mu
-```
+$$
+\frac{\partial \text{loss}}{\partial \mu} = \frac{\partial \text{loss}}{\partial \text{rendered}} \times \frac{\partial \text{rendered}}{\partial \text{projected}} \times \frac{\partial \text{projected}}{\partial \mu}
+$$
 
 **为什么成立？**（从第一性原理）
 
 假设 `y = f(g(x))`，定义导数为极限：
-```math
-f'(u) = lim(Δu→0) [f(u+Δu) - f(u)] / Δu
+$$
+f'(u) = \lim_{\Delta u \to 0} \frac{f(u+\Delta u) - f(u)}{\Delta u}
 ```
 
 当 x 变化 Δx 时：
@@ -352,8 +354,8 @@ f'(u) = lim(Δu→0) [f(u+Δu) - f(u)] / Δu
 
 #### Newton's Method 的诱惑
 
-```math
-μ_new = μ - H⁻¹ · ∇loss
+$$
+\mu_{\text{new}} = \mu - H^{-1} \cdot \nabla \text{loss}
 ```
 
 其中 `H` 是 Hessian 矩阵。听起来很美好——但实际有致命问题：
@@ -420,8 +422,8 @@ f'(u) = lim(Δu→0) [f(u+Δu) - f(u)] / Δu
 
 #### 1D 高斯公式
 
-```math
-𝒩(x; μ, σ²) = (1/√(2πσ²)) · exp(-(x-μ)²/(2σ²))
+$$
+\mathcal{N}(x; \mu, \sigma^2) = \frac{1}{\sqrt{2\pi\sigma^2}} \cdot e^{-(x-\mu)^2/(2\sigma^2)}
 ```
 
 **直观理解**：
@@ -432,8 +434,8 @@ f'(u) = lim(Δu→0) [f(u+Δu) - f(u)] / Δu
 
 #### 3D 高斯推广
 
-```math
-𝒩(x; μ, Σ) = (1/√((2π)³|Σ|)) · exp(-½(x-μ)^T Σ⁻¹ (x-μ))
+$$
+\mathcal{N}(x; \mu, \Sigma) = \frac{1}{\sqrt{(2\pi)^3|\Sigma|}} \cdot e^{-\frac{1}{2}(x-\mu)^T \Sigma^{-1} (x-\mu)}
 ```
 
 **关键变化**：
@@ -454,12 +456,14 @@ f'(u) = lim(Δu→0) [f(u+Δu) - f(u)] / Δu
 **熵的含义**：不确定性度量。熵越大 = 越"不预设额外信息"。
 
 **最大熵原理**：
-```
-最大化 H(p) = -∫ p(x) log p(x) dx
-满足约束:
-  1. ∫ p(x) dx = 1        (归一化)
-  2. ∫ x·p(x) dx = μ      (固定均值)
-  3. ∫ (x-μ)²·p(x) dx = σ² (固定方差)
+$$
+\begin{aligned}
+&\text{最大化 } H(p) = -\int p(x) \log p(x) \, dx \\
+&\text{满足约束:} \\
+&\quad 1. \int p(x) \, dx = 1        && (\text{归一化}) \\
+&\quad 2. \int x \cdot p(x) \, dx = \mu      && (\text{固定均值}) \\
+&\quad 3. \int (x-\mu)^2 \cdot p(x) \, dx = \sigma^2 && (\text{固定方差})
+\end{aligned}
 ```
 
 用拉格朗日乘子法求解，得到唯一解：`p(x) ∝ exp(-ax² + bx)` → 就是高斯形式。
@@ -486,10 +490,10 @@ f'(u) = lim(Δu→0) [f(u+Δu) - f(u)] / Δu
 3D 高素 𝒩(μ, Σ) → 线性投影 → 2D 高斯 𝒩(μ_2d, Σ_2d)
 ```
 
-**关键**：**高斯投影后还是高斯**，而且有解析公式：
-```math
-Σ_2d = J · Σ · J^T
-mu_2d = K @ (R @ mu + T)
+**关键**：**高素投影后还是高素**，而且有解析公式：
+$$
+\Sigma_{2d} = J \cdot \Sigma \cdot J^T \\
+\mu_{2d} = K @ (R @ \mu + T)
 ```
 
 这个性质叫"闭合性"（closure under linear transformation）。其他分布没有这个优势。
@@ -502,8 +506,8 @@ mu_2d = K @ (R @ mu + T)
 
 假设沿一条射线有 N 个高斯，第 i 个的不透明度是 `α_i`，颜色是 `c_i`：
 
-```math
-C = Σᵢ (α_i · c_i · Πⱼ<ᵢ (1-α_j))
+$$
+C = \sum_{i} (\alpha_i \cdot c_i \cdot \prod_{j<i} (1-\alpha_j))
 ```
 
 **解读**：
@@ -514,8 +518,8 @@ C = Σᵢ (α_i · c_i · Πⱼ<ᵢ (1-α_j))
 #### 为什么用高斯定义 α？
 
 3D 高斯在屏幕上的投影是 2D 高素：
-```math
-α(x) = exp(-½ d²(x, μ_2d))
+$$
+\alpha(x) = e^{-\frac{1}{2} d^2(x, \mu_{2d})}
 ```
 
 其中 `d²` 是马氏距离。
