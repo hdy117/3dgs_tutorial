@@ -568,24 +568,6 @@ x_new = relu(W @ x + b)
 
 ---
 
-## 📌 知识地图（更新版）
-
-```mermaid
-graph TD
-    A[前言：为什么叫"线性代数"?] --> B[第一章：向量 Vector]
-    B --> C[第二章：线性变换 Linear Transformation]
-    C --> D[第三章：矩阵 Matrix Representation]
-    D --> E{核心分解}
-    E --> F[特征值/特征向量 Eigen]
-    E --> G[奇异值分解 SVD]
-    D --> H[行列式 Determinant]
-    D --> I[秩 Rank]
-    F --> J[应用：降维/PCA]
-    G --> K[推荐系统/图像压缩]
-```
-
----
-
 ## 📌 知识地图
 
 ```mermaid
@@ -1555,8 +1537,11 @@ A = [1 2 3]       R₂ ← R₂ - 4R₁
 
 ### **7.1 SVD 是什么？**
 
-**任何矩阵 A（m×n）都能分解为：**
-$$A = U\Sigma V^T$$
+**任何矩阵 A（m×n）都能分解为（公式）：**
+
+$$
+A = U\Sigma V^T
+$$
 
 其中：
 - `U` (m×m)：正交阵，左奇异向量
