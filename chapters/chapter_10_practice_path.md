@@ -5,6 +5,151 @@
 **本章核心目标**：在**3周内**，用PyTorch从零实现一个能跑通真实数据集的3DGS系统。不是调库，而是理解每一行代码为什么存在。
 
 ---
+## 实践符号与配置表
+
+### 环境配置符号
+
+```
+变量 | 典型值 | 含义 | 命令示例
+-----|--------|------|----------
+conda_env | 3dgs | 环境名 | conda create -n 3dgs python=3.10
+PyTorch | 2.0+ | 深度学习框架 | conda install pytorch cudatoolkit=11.8
+CUDA | 11.8 | GPU计算库 | 根据GPU版本选择
+依赖包 | - | tqdm, opencv, matplotlib等 | pip install tqdm opencv-python
+数据集 | nerf_synthetic | 小数据集（100张）| wget下载
+```
+
+### 数据加载符号
+
+```
+类/函数 | 输入 | 输出 | 维度 | 说明
+--------|------|------|------|------
+SfMDataset.__getitem__ | idx:int | image:Tensor(3,H,W), camera:dict | - | 返回图像+相机参数
+camera['K'] | - | 内参矩阵 | (3,3) | [[fx,0,cx],[0,fy,cy],[0,0,1]]
+camera['R'] | - | 旋转矩阵 | (3,3) | 世界→相机
+camera['T'] | - | 平移向量 | (3,) | 世界→相机
+camera['width'], ['height'] | - | 图像尺寸 | int | 像素
+scale | 1.0 | 缩放因子 | float | <1加速，>1高清
+```
+
+### GaussianModel 符号
+
+```
+属性/方法 | 维度 | 含义 | 初始化值 | 说明
+---------|------|------|----------|------
+mu | (N,3) | 位置 | SfM点云xyz | 世界坐标
+Sigma | (N,3,3) | 协方差 | diag(scale²) | 各向同性
+alpha | (N,1) | 不透明度 | 0.5 | 半透明起点
+color | (N,3) | 颜色 | RGB/255 | 归一化
+N | 标量 | 高斯数量 | len(points3d) | 动态变化
+get_scales() | (N,3) | 各轴尺度 | √eigvals(Sigma) | 长度单位
+_estimate_scales() | - | 尺度估计函数 | - | 从重投影误差
+scale_factor | 0.5 | 尺度系数 | float | 调参用
+```
+
+### 投影与渲染符号
+
+```
+函数 | 输入 | 输出 | 维度 | 说明
+-----|------|------|------|------
+project_gaussian() | mu, Sigma, R, T, K | mu_2d, Sigma_2d, depth | (N,2),(N,2,2),(N,) | 3D→2D投影
+render_slow() | gaussians, camera, H, W | image | (3,H,W) | O(N·H·W)调试用
+render_tiled() | gaussians, camera, H, W | image | (3,H,W) | Tile优化版
+compute_bbox() | mu_2d, Sigma_2d | bbox_min, bbox_max | (N,2),(N,2) | 包围盒
+assign_gaussians_to_tiles() | bbox_min, bbox_max | tile_mapping | list[list[int]] | 倒排索引
+tile_size | 16 | Tile大小 | int | 像素，通常8/16/32
+```
+
+### 损失函数符号
+
+```
+函数/变量 | 维度 | 含义 | 典型值
+----------|------|------|----------
+compute_loss() | rendered, gt, gaussians | loss, L1, L_ssim | 返回标量
+L1 | 标量 | 平均绝对误差 | ∈ [0,1]
+L_ssim | 标量 | 1 - MS-SSIM | ∈ [0,1]
+λ_ssim | 0.8 | SSIM权重 | 0.8
+L_scale | 标量 | 尺度正则 | λ_scale=0.01
+scales = get_scales() | (N,3) | 各轴尺度 | 从Σ特征值
+L_total | 标量 | 总损失 | L_img + λ_scale·L_scale
+```
+
+### 密度控制符号
+
+```
+函数 | 输入 | 输出 | 说明
+-----|------|------|------
+densify_and_prune() | gaussians, optimizer, radii, grads_mu, grads_Sigma | 修改gaussians | 增删高斯
+to_densify_mask | (N,) bool | 条件: radii>thresh & grad>thresh | 双条件
+to_prune_mask | (N,) bool | 条件: α<prune_α or scale<prune_scale | 删除条件
+split_gaussian() | idx | g1, g2 | 沿主方向分裂
+clone_gaussian() | idx | new_gaussian | 复制
+rebuild_optimizer() | gaussians | optimizer | N变化后重建
+max_gaussians | 2e6 | 上限 | 内存保护
+```
+
+### 训练循环符号
+
+```
+变量/函数 | 类型 | 含义 | 更新频率
+----------|------|------|----------
+optimizer | Adam | 优化器 | 每step（N变化时重建）
+data_iter | iter | 数据迭代器 | 每epoch重置
+gt_image, camera | Tensor/dict | 批次数据 | 每step
+rendered, radii | Tensor, (N,) | 渲染结果 | 每step
+grads_mu_cache, grads_Sigma_cache | (N,) | 梯度缓存 | 每densify_interval步
+lr_decay_steps | [7500, 15000] | 学习率衰减步 | 到达时×0.1
+log_interval | 100 | 日志间隔 | 每100步
+```
+
+### 调试检查清单符号
+
+```
+阶段 | 检查点 | 通过标准 | 失败症状
+-----|--------|----------|----------
+数据加载 | dataset[0] | 返回合理tensor | shape错误
+初始化 | gaussians.N | 1k-50k | N=0或N极大
+慢速渲染 | render_slow() | 有轮廓，非全黑/白 | 全黑: scale_factor↑; 全白: scale_factor↓
+训练100步 | loss下降 | 1.0→0.5 | 不降: LR调整
+Densify | N增长 | 10k→50k | 不增长: grad_threshold↓
+Tile渲染 | 单帧<100ms | time测量 | 不降: 检查tile实现
+完整训练 | PSNR>25 | 测试集评估 | <20: 回退检查
+```
+
+### 时间预算符号（RTX 4090, chair数据集）
+
+```
+阶段 | 任务 | 预计时间 | 实际时间
+-----|------|----------|----------
+Week1 | 环境+数据加载 | 2-4h | -
+Week1 | 慢速渲染实现 | 6-8h | -
+Week1 | 训练循环（无densify）| 6-8h | -
+Week1 | 验收（1000步，PSNR>15）| - | 30分钟训练
+Week2 | Tile优化 | 8-12h | -
+Week2 | 密度控制 | 8-10h | -
+Week2 | 完整训练（30k步）| - | 30-60分钟
+Week2 | 验收（PSNR>25, <100ms）| - | -
+Week3 | 推理优化 | 8-12h | -
+Week3 | 自己的数据 | 6-8h | -
+总计 | - | 3周 | -
+```
+
+### 典型失败症状与修复
+
+```
+症状 | 优先级 | 可能原因 | 快速检查 | 修复
+-----|--------|----------|----------|------
+渲染全黑 | 高 | Σ太小 | scales.mean() | scale_factor×5-10
+渲染全白 | 高 | α太大或Σ太大 | alpha.mean() | α=0.3, scale_factor÷2
+图像偏移 | 高 | 坐标系错 | 渲染vs GT对比 | R/T符号调整
+loss NaN | 高 | Σ奇异 | torch.det(Sigma) | Σ += I·1e-8
+梯度为0 | 中 | 高斯"死" | mu.grad.norm() | 增大α初始值
+不收敛 | 中 | LR不对 | loss曲线 | LR×10或÷10
+速度慢 | 低 | 未优化 | 是否tile版 | 切换到render_tiled
+N不增长 | 中 | densify不触发 | radii, grads | grad_threshold↓
+```
+
+---
 
 ## 一、实践的本质：你在构建什么？
 

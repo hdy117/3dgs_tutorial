@@ -6,6 +6,77 @@
 
 ---
 
+## 符号与参数约定表
+
+### SfM 输出符号
+
+```
+符号 | 类型 | 含义 | 维度/格式
+-----|------|------|----------
+points3D | dict | 3D点云 | {id: Point3D}
+  Point3D.xyz | (3,) | 3D坐标 | 世界坐标
+  Point3D.rgb | (3,) | 颜色 | 0-255整数
+  Point3D.track | list | 观测该点的图像列表 | [{image_id, point2D}, ...]
+cameras | dict | 相机内参 | {id: Camera}
+  Camera.model | str | 相机模型 | "PINHOLE"或"SIMPLE_PINHOLE"
+  Camera.params | (4,)或(3,) | [fx, fy, cx, cy]或[fx, cx, cy] | 像素
+images | dict | 相机外参 | {id: Image}
+  Image.qvec | (4,) | 四元数（旋转）| [w,x,y,z]
+  Image.tvec | (3,) | 平移向量 | 世界坐标
+  Image.name | str | 图像文件名 | -
+```
+
+### 初始化参数符号
+
+```
+符号 | 维度 | 含义 | 初始值 | 说明
+-----|------|------|--------|------
+μ_i  | (3,) | 高斯位置 | SfM点云xyz | 直接复制
+c_i  | (3,) | 高斯颜色 | RGB/255 | 归一化到[0,1]
+Σ_i  | (3,3)| 协方差 | scale²·I | 各向同性
+α_i  | (1,) | 不透明度 | 0.5 | 半透明起点
+scale | 标量| 尺度估计 | median(reproj_err)×factor | factor=0.5
+```
+
+### 重投影误差计算符号
+
+```
+符号 | 维度 | 含义 | 公式
+-----|------|------|------
+X_cam| (3,) | 相机坐标 | R·P_xyz + T
+proj_hom| (3,) | 齐次像素坐标 | K·X_cam
+proj | (2,) | 像素坐标 | proj_hom[:2] / proj_hom[2]
+err  | 标量 | 重投影误差 | ||proj - point2D||₂
+scale| 标量 | 3D尺度估计 | median(errors) × scale_factor
+```
+
+### 坐标系转换符号
+
+```
+坐标系 | 约定 | 轴向 | 用途
+-------|------|------|------
+COLMAP | 右手系 | Y-up, Z-forward | SfM输出
+3DGS/NeRF | 右手系 | Z-up, Y-down | 渲染
+transform | (3,3) | diag[1, -1, -1] | 转换矩阵
+
+应用:
+  R_nerf = R_colmap @ transform
+  T_nerf = transform @ T_colmap
+```
+
+### 调试检查符号
+
+```
+检查项 | 计算方法 | 期望范围 | 问题诊断
+-------|----------|----------|----------
+平均尺度 | scales.mean() | 0.1-10 | <0.01: scale_factor↑; >100: scale_factor↓
+平均α | alpha.mean() | 0.3-0.7 | >0.8: α调低; <0.1: α调高
+投影中心 | mu_2d范围 | [0,W]×[0,H] | 偏移: 检查R/T符号
+Σ行列式 | det(Sigma) | >0 | <1e-10: Σ正则化
+```
+
+---
+
 ## 一、问题的本质：初始化为什么重要？
 
 ### 1.1 初始化 vs 训练
