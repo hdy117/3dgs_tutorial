@@ -64,6 +64,13 @@
   - 边缘的点应该在切平面内扩散
 - ❌ 表达能力不足
 
+#### 🔍 关键概念细化：**什么是"各向异性"**？
+<details>
+<summary>点击展开</summary>
+各向同性（球）：所有方向尺度一样 → radius = 0.1（一个数）
+各向异性（椭球）：不同方向可以不同 → scale_x, scale_y, scale_z = (0.5, 0.5, 0.05)
+真实表面需求：平坦处沿切平面扩散，细长物沿轴向拉长。
+
 **椭球看起来不错？——但有陷阱**
 - 可以描述任意方向的拉伸 ✅
 - **但投影公式呢？** ——均匀分布的椭球，投影截面面积计算复杂
@@ -97,6 +104,46 @@ A4: 可微分（训练要求）→ 所有操作需支持反向传播
 | **高斯 (正态)** | exp(-½(x-μ)ᵀΣ⁻¹(x-μ)) | ✅ **仍是高斯** | ✅ Σ完整描述 |
 
 **关键数学事实**：
+
+#### 🔍 关键概念细化：**为什么高斯有线性变换封闭性？（简短证明）**
+
+<details>
+<summary>点击展开</summary>
+
+**问题**: X ~ N(μ, Σ)，Y = AX + b，证明 Y ~ N(Aμ+b, AΣAᵀ)
+
+**证明思路**：用概率密度函数的变量代换公式。
+
+```math
+# X 的 PDF:
+p_X(x) ∝ exp(-½(x-μ)ᵀ Σ⁻¹ (x-μ))
+
+# Y = AX + b → x = A⁻¹(y-b) （假设 A 可逆）
+# Jacobian: |∂x/∂y| = |A⁻¹|
+
+# 变量代换：
+p_Y(y) = p_X(A⁻¹(y-b)) · |A⁻¹|
+       ∝ exp(-½(A⁻¹(y-b) - μ)ᵀ Σ⁻¹ (A⁻¹(y-b) - μ)) · |A⁻¹|
+
+# 化简指数项：
+A⁻¹(y-b) - μ = A⁻¹(y - b - Aμ) = A⁻¹(y - (Aμ+b))
+
+代入：
+(y - (Aμ+b))ᵀ (A⁻¹)ᵀ Σ⁻¹ A⁻¹ (y - (Aμ+b))
+= (y - (Aμ+b))ᵀ (AΣAᵀ)⁻¹ (y - (Aμ+b))
+
+# 结论：p_Y(y) = N(y | Aμ+b, AΣAᵀ) ✅
+```
+
+**关键步骤**: `(A⁻¹)ᵀ Σ⁻¹ A⁻¹ = (AΣAᵀ)⁻¹`（矩阵逆的性质）
+
+**物理意义**: 高斯分布在线性变换下"形状不变"——只是均值和协方差跟着变换。这就是为什么：
+- **投影是线性的（局部近似）** → 3D 高斯投影后仍是 2D 高斯
+- **旋转/缩放也是线性变换** → 高斯在这些操作下保持形式
+
+其他分布（均匀、指数等）没有这个性质——它们在线性变换后会变成完全不同的形式！
+</details>
+
 > 如果 X ~ N(μ, Σ)，对任意线性变换 Y = AX，那么 Y ~ N(Aμ, AΣAᵀ)
 
 这就是**投影封闭性**——高斯的唯一性来源。
@@ -127,6 +174,24 @@ G(x) = \frac{1}{\sqrt{(2\pi)^3 |\Sigma|}} \exp\left(-\frac{1}{2} (x - \mu)^\top 
 - **Σ ∈ ℝ³ˣ³**：协方差矩阵，对称正定，6 个独立参数
 - **|Σ|**：行列式，表示"体积平方"
 - **Σ⁻¹**：精度矩阵（inverse covariance）
+
+
+#### 🔍 关键概念细化：**为什么是 6 个独立参数，不是 9 个？**
+
+<details>
+<summary>点击展开</summary>
+
+**协方差矩阵是对称的！**
+```math
+Σ = [σ_xx σ_xy σ_xz; σ_yx σ_yy σ_yz; σ_zx σ_zy σ_zz]
+其中 σ_ij = σ_ji（对称性）→ 独立参数只有 6 个：3 个对角 +3 个上三角
+
+等价表示方式对比：
+- 直接存 Σ: 6 个数，但梯度下降可能失去正定性 ❌  
+- 尺度 (3) + 四元数 (4, |q|=1): scale>0 + 归一化 → **自动保证正定** ✅
+
+这就是 3DGS 为什么用"scale + quat"参数化的原因！
+</details>
 
 **总自由度**：3 + 6 = 9 个参数描述一个 3D 高斯
 
@@ -277,6 +342,46 @@ J = \begin{bmatrix}1/\mu_Z & 0 & -\mu_X/\mu_Z^2 \\ 0 & 1/\mu_Z & -\mu_Y/\mu_Z^2\
 
 ## 五、渲染管线：从投影到像素混合
 
+
+#### 🔍 关键概念细化：**Alpha Blending 公式的物理推导**
+
+<details>
+<summary>点击展开</summary>
+
+**从光学基本定律出发**：
+
+考虑光线穿过半透明介质，在位置 t 处有微元 dt：
+- **被吸收的光**: dI = I(t) · σ(t) · c(t) · dt  
+- **透过的光**: I(t+dt) = I(t) - dI = I(t)·(1 - σ·c·dt)
+
+**累积效果（从 t_n 到 t_f）**：
+```
+I_out = ∫ T(t)·σ(t)·c(t) dt
+其中 T(t) = exp(-∫_{t_n}^{t} σ(s)ds) = "从起点到 t 的透射率"
+```
+
+**离散化（N 层半透明物体）**：
+```python
+C = 0, T_acc = 1.0   # 初始：黑色 + 全透射
+for layer in layers_sorted_by_depth:  # 从远到近！
+    alpha = layer.transparency  # ∈ [0,1]，该层的不透明度
+    
+    C += T_acc * (1-alpha) * layer.color  # 新增贡献 = 剩余光线 × 透过率 × 颜色  
+    T_acc *= alpha                        # 累积透射率衰减
+```
+
+**为什么必须从后到前？**
+- **物理正确性**: 先计算远处的贡献，再被近处遮挡
+- **早停优化**: T_acc < ε时可以直接 break（前面已经挡住了）
+- **不可交换性**: (A 混合 B) ≠ (B 混合 A)，顺序很重要！
+
+**对比 NeRF vs 3DGS**：
+- NeRF: Ray Marching = 沿射线积分体积密度
+- 3DGS: Alpha Blending = 离散高斯层的叠加（数学等价，但计算方式不同）
+
+这就是为什么 2D 投影后要做"排序 + 混合"——这是物理光传输的必然要求！
+</details>
+
 ### 5.1 Alpha Blending——为什么是"从后到前"？
 
 现在有 N 个 2D 高斯投影在图像上，每个都有颜色 cᵢ和透明度 αᵢ。怎么合成最终像素颜色？
@@ -319,6 +424,62 @@ for i in sorted_gaussians(by=depth, ascending=False):
 
 **3DGS 的优化**：
 ```
+
+#### 🔍 关键概念细化：**Tile-based Culling 的具体实现**
+
+<details>
+<summary>点击展开</summary>
+
+**朴素方法的瓶颈**:
+```python
+# O(N×M) - 太慢！
+for pixel in all_pixels:         # 2M pixels
+    for gaussian in all_gaussians:  # 100K gaussians  
+        if gaussian.affects(pixel):
+            blend(...)
+# = 2 亿次判断，大部分是高斯根本不影响该像素！
+```
+
+**Tile-based Culling 的核心思想**: "空间局部性"——高斯只影响一小片屏幕区域。
+
+**实现步骤**：
+```python
+# Step 1: 分块
+tile_width, tile_height = 16, 16
+num_tiles_w, num_tiles_h = ceil(1920/16), ceil(1080/16)  # 120×68 = 8160 tiles
+
+# Step 2: 对每个高斯，计算它影响的 tile 列表
+for gaussian in gaussians:
+    bbox_2d = compute_bounding_box(gaussian.mean_2d, gaussian.Sigma_2d)  
+    # Σ_2d 的 3σ范围覆盖~99.7%的概率质量
+    
+    affected_tiles = []
+    for tile_x in [bbox_min_w//16, ..., bbox_max_w//16]:
+        for tile_y in [bbox_min_h//16, ..., bbox_max_h//16]:
+            affected_tiles.append((tile_x, tile_y))
+
+# Step 3: 构建"tile → 高斯列表"的索引
+tile_to_gaussians = defaultdict(list)
+for gaussian, tiles in zip(gaussians, all_affected_tiles):
+    for tile in tiles:
+        tile_to_gaussians[tile].append(gaussian)
+
+# Step 4: 渲染时，每个 tile 只混合相关高斯
+for tile_id in all_tiles:
+    relevant_gaussians = tile_to_gaussians[tile_id]  # ~30-100 个
+    render_tile(relevant_gaussians)  # 快速！
+
+# 复杂度：O(N + M×k)，k=每像素平均高斯数 (~30) << N (100K)
+```
+
+**GPU 优化细节**:
+- **并行化**: 每个 tile 独立渲染 → 完美映射到 GPU thread block
+- **内存访问**: 连续读取一个 tile 的所有高斯参数 → cache-friendly
+- **早停**: T_acc < ε时提前结束该 pixel 的混合
+
+这就是为什么<10ms/帧能做到——不是靠更快的硬件，而是**算法复杂度从 O(N×M) 降到 O(M×k)**！
+</details>
+
 # Tile-based culling（分块剔除）
 1. 把图像分成 16×16 的小块（tiles）
 2. 对每个高斯，计算它的 2D 边界框（bounding box）
