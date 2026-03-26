@@ -1,6 +1,6 @@
 # 线性代数：从“空间里的动作”到 3DGS 的数学骨架
 
-**本章核心问题**：当你在 3DGS、图形学或视觉代码里看到 `R @ x + t`、`R @ Sigma @ R.T`、`J @ Sigma @ J.T`、`d.T @ Sigma_inv @ d`、`A = U @ S @ V.T` 这些式子时，为什么它们看起来不同，却其实都在讲同一件事？
+**本章核心问题**：当你在 3DGS、图形学或视觉代码里看到 `R @ x + t`、`R @ Sigma @ R.T`、`J @ Sigma_cam @ J.T`、`d.T @ Sigma_inv @ d`、`A = U @ S @ V.T` 这些式子时，为什么它们看起来不同，却其实都在讲同一件事？
 
 答案先说在前面：**线性代数研究的不是“矩阵题”，而是“空间中的对象，以及对象在变换下如何变化”**。
 
@@ -950,7 +950,7 @@ A = U S V^T
 
 > 把高斯的几何形状一起转到相机眼里去。
 
-### 11.4 `Sigma_2d = J @ Sigma_cam @ J.T` 为什么成立
+### 11.4 `Sigma_2d ≈ J @ Sigma_cam @ J.T` 为什么成立
 
 透视投影本来不是线性的，因为里面有除法。
 
@@ -963,7 +963,7 @@ delta_p ≈ J delta_x
 一旦局部近似成线性，协方差就可以按线性规则传播：
 
 ```text
-Sigma_2d ≈ J Sigma_3d J^T
+Sigma_2d ≈ J @ Sigma_cam @ J.T
 ```
 
 这一步特别重要，因为它说明：
@@ -992,7 +992,7 @@ Sigma_2d ≈ J Sigma_3d J^T
 - 特征值/特征向量：椭球的主轴与尺度
 - `det(Sigma)`：椭球的整体体积尺度
 - `Sigma^-1`：按椭球几何定义的距离度量
-- `J Sigma J^T`：把椭球从 3D 局部传播到 2D 局部
+- `J @ Sigma_cam @ J.T`：把椭球从 3D 局部传播到 2D 局部
 
 你可以把它们理解成看同一个对象的不同镜头，而不是几套互不相干的公式。
 
@@ -1115,7 +1115,7 @@ print('rank(A) =', np.linalg.matrix_rank(A))
 4. 为什么同一个向量换套坐标系，数字会变？
 5. 为什么协方差矩阵能表示椭球？
 6. 为什么 `R @ Sigma @ R.T` 是正确的椭球旋转方式？
-7. 为什么 `J @ Sigma @ J.T` 是局部投影后的协方差？
+7. 为什么 `J @ Sigma_cam @ J.T` 是局部投影后的协方差？
 8. 为什么行列式和秩都在问“有没有压塌”？
 9. 为什么 SVD 能把任意矩阵拆成“转一下，拉一下，再转一下”？
 
@@ -1129,7 +1129,7 @@ print('rank(A) =', np.linalg.matrix_rank(A))
 
 1. 回头再看 `chapters/chapter_00_math_foundation.md`，把“数学是怎么被问题逼出来的”这条主线再过一遍
 2. 接着读 `chapters/chapter_03_gaussian_splatting.md`，重点把协方差矩阵和高斯椭球真正连起来
-3. 再看 `chapters/chapter_04_differentiable_rendering.md`，重点盯住 `J @ Sigma @ J.T`、屏幕 footprint、局部线性化这几件事
+3. 再看 `chapters/chapter_04_differentiable_rendering.md`，重点盯住 `J @ Sigma_cam @ J.T`、屏幕 footprint、局部线性化这几件事
 4. 然后再回来重看这章，你会发现它不再像“前置知识清单”，而像一份读代码的词典
 
 到这里，线性代数就不再是门外的抽象课，而会变成你读懂 3DGS 的母语。
