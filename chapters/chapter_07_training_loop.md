@@ -1,603 +1,741 @@
-# 第 7 章：训练闭环——从初始化到收敛的完整迭代
+# 第 7 章：训练闭环——从第一批高斯到收敛场景，中间到底发生了什么
 
-**学习路径**：`problem → starting point → invention → verification → example`
+**本章核心问题**：第 6 章已经解释了第一批 Gaussian 从哪来。现在问题变成：
 
----
+> 这些还很粗糙的 Gaussian，怎样在一轮又一轮训练里，慢慢学成正确的位置、形状、透明度和外观？又为什么 3DGS 的训练不只是“反向传播 + Adam”这么简单？
 
-## 🎯 Problem：高斯有了，怎么让它们"学会"正确的场景？
+如果前面几章已经分别回答了：
 
-想象一下：你刚刚完成了第 6 章的初始化。现在有 **N 个高斯**（可能是 10⁵-10⁶），每个都有位置μ、协方差Σ、不透明度α和颜色 c。**但它们虽然已经不再是随机撒出来的，仍然只是粗糙的第一版**——渲染出来的图像可能一团糟。
+- 第 3 章：为什么 primitive 选 Gaussian
+- 第 4 章：这些 Gaussian 怎样被渲染成图
+- 第 5 章：什么叫“学对”，loss 为什么这样设计
+- 第 6 章：第一批 Gaussian 从哪来
 
-现在你要回答几个问题：
+那么这一章要回答的就是：
 
-> **Q1: 怎么让这些参数"自动调整"到正确的值？**  
-> → 需要优化器（Adam）、损失函数（L1+SSIM）、反向传播...但这只是基础
-   
-> **Q2: 高斯数量 N 应该固定吗？如果场景某些区域太复杂怎么办？**  
-> → 需要动态增删——这就是**密度控制（densification/pruning）**
-   
-> **Q3: 训练多久算"成功"？怎么判断收敛了还是失败了？**  
-> → 需要监控指标（PSNR、损失曲线）、诊断工具
-
-**这三个问题是本章要解决的核心。**
-
----
-
-## 📍 Starting Point：从推理到训练——缺了什么？
-
-### 你已经有了什么？（第 1-6 章）
-
-```
-推理管线（前向传播）：
-输入：相机参数 K, R, t + 高斯参数 {μ, Σ, α, c}
-     ↓
-投影 → 排序 → Tile-based 混合渲染
-     ↓
-输出：渲染图像 rendered_image (H×W×3)
+```text
+这些东西怎样真正被接成一条可运行、可诊断、可收敛的训练闭环
 ```
 
-### 训练需要什么额外的东西？
+先把主线写在前面：
 
-对比**推理 vs 训练**：
+```text
+初始化给你的是脚手架
+渲染给你的是预测图
+图像误差给你的是修正方向
+optimizer 负责连续调参
+periodic densify / split / prune 负责重分配表示容量
+日志和可视化负责告诉你：系统是在收敛，还是已经开始出事
+```
 
-| 推理 | 训练（新增） |
-|------|-------------|
-| 输入：相机参数 | 输入：相机参数 + **真实图像 gt_image** |
-| 输出：渲染图 | 输出：**更新后的高斯参数** |
-| 操作：前向传播 | 操作：前向 → **损失计算** → **反向传播** → **优化器更新** → **密度控制** |
-
-**关键差异**：训练是"闭环"——渲染结果要和真实图像比较，误差驱动参数更新。
-
----
-
-## 🔥 Invention：从公理到设计决策
-
-### 第一步：找到不可约的事实（Axioms）
-
-#### 公理 1：梯度必须稳定传递
-
-**事实**：3DGS 渲染管线包含多个可微操作（投影、混合），但有两个"断点"：
-- **排序**（argsort）是不可微的离散操作
-- **密度控制**（增删高斯）是离散操作，会改变参数数量 N
-
-**矛盾**：如果每帧都重新排序，梯度流会被打断吗？如果频繁增删高斯，优化器状态怎么办？
-
-**解决路径**（这是 3DGS 的洞察！）：
-1. **排序只在阶段 1 做一次**（全局深度排序），阶段 2-4 使用这个固定顺序
-2. **密度控制每 N 步才执行一次**（比如 1000 步），期间梯度流不被打断
-
-**关键设计**：densify/prune 使用**缓存的梯度**，不干扰当前优化器的动量状态。
+这就是 3DGS 训练循环最短的工程主线。
 
 ---
 
-#### 公理 2：密度控制需要"学习信号"
+## 一、先把训练看成一条真正闭合的回路
 
-**问题**：什么时候增加高斯？什么时候删除？
+如果只看一帧，你会以为 3DGS 和普通可微渲染没有本质区别：
 
-如果你只是随机增减，那和蒙特卡洛采样有什么区别？**必须有信号**。
+```text
+输入高斯 + 相机
+-> 渲染
+-> 图像损失
+-> 反向传播
+```
 
-**3DGS 的洞察**（基于梯度的几何直觉）：
+但 3DGS 真正的训练不是一帧，而是一条闭环：
 
-| 信号 | 含义 | 动作 |
-|------|------|------|
-| **梯度大** (‖∇μ‖ > threshold) | 该高斯对误差贡献大 → 需要更多表示 | **增加** |
-| **投影尺度大** (radius > 10px) | 该高斯在 3D 空间太大 → 应该分裂 | **分裂（split）** |
-| **梯度小 + 透明度低** (α < 0.001) | 该高斯无贡献 → 浪费显存 | **删除（prune）** |
+```text
+初始化高斯
+-> 采样一个训练视角
+-> 渲染当前图像
+-> 和 GT 比较得到损失
+-> 反向传播得到梯度
+-> optimizer 更新参数
+-> 周期性 densify / split / prune
+-> 继续采样下一个视角
+-> 重复很多轮，直到收敛
+```
 
-**这个设计很漂亮**：用可微信号（梯度范数、投影半径）驱动密度调整，而不是启发式规则。
+这条链里有两件事必须同时成立：
 
----
+- 连续参数得往正确方向收敛
+- 表示容量得在训练过程中被持续重分配
 
-#### 公理 3：学习率需要阶段适应性
+如果只有前者，没有后者，模型经常会“想学细节，但手里刷子不够”。
+如果只有后者，没有前者，系统又会一直长结构，却不知道怎么把每个结构调准。
 
-**观察**：参数在不同训练阶段的"距离最优值有多远"是不同的：
-- **初期**（step < 7.5k）：参数远离最优 → 大 LR 快速调整
-- **中期**（7.5k < step < 15k）：接近最优 → 中 LR 精细调整  
-- **后期**（step > 15k）：微调阶段 → 小 LR 防止过拟合
+所以这一章真正讲的是：
 
-**结论**：学习率调度应该是**阶梯式衰减**的。
-
----
-
-### 第二步：推导矛盾（Contradictions）
-
-#### 矛盾 1：优化器状态 vs 参数数量变化
-
-**问题浮现**：
-- Adam 优化器维护动量 m_t 和方差 v_t，数量与参数成正比
-- densify/prune 会改变高斯数量 N
-- **如果 N 变了，优化器的状态怎么办？**
-
-让我们推导三种方案：
-
-| 方案 | 做法 | 优点 | 缺点 |
-|------|------|------|------|
-| A | 每 densify/prune 后**重建优化器** | 简单，状态对齐 | Adam 动量丢失（需要 warm-up） |
-| B | **仅增删对应参数的状态** | 保留动量，高效 | 实现复杂（索引管理麻烦） |
-| C | 用 SGD（无状态） | 无需管理状态 | 收敛可能慢，手动调 LR 痛苦 |
-
-**3DGS 的选择**：方案 A（重建优化器）。为什么？
-- densify/prune **每 1000 步才一次**，开销占比 < 1%
-- Adam 动量丢失的影响可以通过 warm-up 缓解
-- **实现简单 > 理论最优**
+> 3DGS 的训练为什么是一条“连续优化 + 结构编辑”联合驱动的闭环。
 
 ---
 
-#### 矛盾 2：梯度缓存 vs 实时性
+## 二、把训练循环先写成最核心的伪代码
 
-**问题浮现**：
-- densify 需要梯度信息（判断哪些高斯需要分裂/克隆）
-- 但反向传播后，`param.grad` 立即可用
-- **为什么需要"缓存"？不能直接用当前步的梯度吗？**
-
-让我们分析噪声来源：
+如果把所有细节先压掉，3DGS 的训练主循环可以写成：
 
 ```python
-# 假设 batch size = 1（单视角采样）
-gt_image, camera = dataset.sample()  # 随机采样一个视角
-rendered = render(gaussians, camera)
-loss = L(rendered, gt_image)
+for step in range(total_steps):
+    gt_image, camera = sample_training_view(dataset)
 
-# 此时 grads_mu[i] 只反映了"第 i 个高斯在当前视角下的误差贡献"
-# 但如果这个高斯在其他视角下很重要呢？→ 噪声！
+    rendered, radii = render(gaussians, camera)
+
+    l1 = l1_loss(rendered, gt_image)
+    l_ssim = 1 - ssim(rendered, gt_image)
+    l_img = (1 - lambda_dssim) * l1 + lambda_dssim * l_ssim
+
+    optimizer.zero_grad()
+    l_img.backward()
+    optimizer.step()
+
+    if step % densify_interval == 0:
+        update_density_control(gaussians, radii)
+
+    log_metrics(step, l1, l_img, gaussians)
 ```
 
-**结论**：单步梯度受 batch sampling 随机性影响大，需要缓存 N 步取平均。
+这段伪代码已经足够说明本章最关键的分工：
 
-**实现设计**：
+- `render(...)`：把当前表示变成图像
+- `l_img`：告诉系统“哪里不像”
+- `optimizer.step()`：做连续参数更新
+- `update_density_control(...)`：做离散结构编辑
+- `log_metrics(...)`：检查系统是在学，还是在崩
+
+你如果想理解一章训练循环，这就是骨架。
+
+---
+
+## 三、从第 6 章接过来：初始化给的是脚手架，不是答案
+
+第 6 章已经讲过，初始化的目标不是“一开始就真”，而是：
+
+> 把系统送进一个可训练区间。
+
+所以一开始的 Gaussian 虽然已经不再是随机撒的，但仍然常常有下面这些问题：
+
+- 位置只是大致对
+- 形状还比较保守，往往偏各向同性
+- 不透明度只是中等起点
+- 细节远远不够
+- 有些区域还没被充分覆盖
+
+你可以把初始状态想成：
+
+```text
+场景的第一层脚手架已经搭起来了
+但离真正可用的高质量表示还差很远
+```
+
+所以训练前期真正要做的，不是“精修到发丝级别”，而是先把系统从“粗糙但可训”推到“结构已经成形”。
+
+---
+
+## 四、每一步训练里，误差到底在推动什么
+
+### 4.1 图像误差先在屏幕上暴露问题
+
+对某个采样视角 `cam_k`，当前预测图像是：
+
+```text
+I_pred^k = render(Theta, cam_k)
+```
+
+真实图像是：
+
+```text
+I_gt^k
+```
+
+于是最核心图像项仍然是第 5 章那条：
+
+```text
+L_img = (1 - lambda_dssim) * L1 + lambda_dssim * (1 - SSIM)
+```
+
+常见设置仍然是：
+
+```text
+lambda_dssim = 0.2
+```
+
+也就是：
+
+```text
+L_img ≈ 0.8 * L1 + 0.2 * (1 - SSIM)
+```
+
+### 4.2 误差不会直接说“该加几个高斯”，它只会先说“哪里不像”
+
+这点很重要。loss 本身只能表达：
+
+- 哪些像素颜色不对
+- 哪些边缘还糊
+- 哪些局部结构还没守住
+
+它不会直接说：
+
+```text
+这里该 clone 两个高斯
+那里该 split 一个
+那边该 prune 掉三个
+```
+
+所以训练闭环里必须再多一层解释：
+
+> 先让图像误差生成梯度信号，再由训练规则把这些信号翻译成“连续调参”或“结构编辑”。
+
+这正是第 5 章里“loss 和训练规则分工”的具体落地。
+
+---
+
+## 五、连续参数更新：optimizer 每一步到底在改什么
+
+设当前参数集合是：
+
+```text
+Theta = {mu_i, Sigma_i, alpha_i, sh_i}_i
+```
+
+更贴近真实实现时，也常常会写成：
+
+```text
+Theta = {mu_i, scale_i, rotation_i, opacity_i, sh_i}_i
+```
+
+不管参数化怎样变，优化器每一步做的事情本质都一样：
+
+### 5.1 `mu` 在学“东西该在哪”
+
+如果渲染边缘总偏、局部结构总错位，位置梯度会推动 `mu` 调整。
+
+### 5.2 `Sigma / scale / rotation` 在学“局部形状该怎样贴合结构”
+
+如果 footprint 太胖、太窄、朝向不对，形状相关梯度会推动它变细、变宽、变斜。
+
+### 5.3 `alpha / opacity` 在学“该遮多少，透多少”
+
+太透明会导致区域总画不出来，太不透明又会压死后面的层。opacity 参数就是在平衡这件事。
+
+### 5.4 `color / sh` 在学“看起来该是什么外观”
+
+这部分最直接，就是把颜色和视角相关外观往 GT 拉近。
+
+所以如果你把一整个 step 的连续优化说成一句话，就是：
+
+> optimizer 在持续修正“放哪、长什么形、遮多少、看起来怎样”。
+
+---
+
+## 六、为什么训练里不能只靠连续调参
+
+这一步是理解 3DGS 的真正分水岭。
+
+假设某片细叶子区域本来只放了几个 Gaussian。你可以一直对这几个 Gaussian 做梯度下降，但它们能做的也就只有：
+
+- 挪位置
+- 改形状
+- 调透明度和颜色
+
+它们做不到的是：
+
+```text
+“这片区域其实本来就需要更多局部自由度，我自己长出更多 Gaussian 来”
+```
+
+所以训练里一定会出现这样的时刻：
+
+> 误差已经在告诉你“这里还不够”，但当前这套表示本身没有足够容量把这个区域解释细。
+
+这就是 densify / split / clone / prune 要登场的原因。
+
+---
+
+## 七、密度控制到底依赖什么信号
+
+3DGS 里最常见的结构编辑信号，核心只有两类。
+
+### 7.1 信号一：梯度长期偏大
+
+如果某个 Gaussian 相关的梯度长期偏大，通常说明：
+
+```text
+这片区域持续没学好
+```
+
+它的含义不是“这一帧刚好有点误差”，而更像：
+
+> 这里的表示容量可能不够，或者局部结构还没被合适拆开。
+
+### 7.2 信号二：屏幕空间 footprint 太大
+
+训练里常常会记录每个 Gaussian 投影后的 2D 半径或覆盖范围，记作：
+
+```text
+r_i
+```
+
+它反映的不是 3D 尺度本身，而是：
+
+> 这个 Gaussian 在当前视图里到底在屏幕上铺得有多开。
+
+这里一定要分清三件不同的东西：
+
+- **3D 尺度**：Gaussian 在世界空间里有多大
+- **2D 半径 / footprint**：它投到当前屏幕上覆盖多大
+- **梯度阈值**：损失对这个 Gaussian 参数的敏感度有多强
+
+这三者不是一回事，但它们会在训练决策里被一起使用。
+
+### 7.3 一个特别实用的判断逻辑
+
+你可以把密度控制最常见的逻辑压成：
+
+```text
+梯度大 -> 这里还没学好
+footprint 大 -> 这里太粗了
+两者都成立 -> 倾向 split / densify
+```
+
+这正是第 5 章里结构编辑思想在训练循环中的具体落地。
+
+---
+
+## 八、clone、split、prune 在训练循环里到底怎样分工
+
+### 8.1 Clone：当前 Gaussian 不算太粗，但人数不够
+
+如果某个 Gaussian：
+
+- 误差信号大
+- 但 footprint 并不算大
+
+那常见判断是：
+
+> 不是它太大，而是这个区域需要更多相近的局部自由度。
+
+这时 clone 更合理。
+
+### 8.2 Split：这个 Gaussian 太大，又一直学不好
+
+如果某个 Gaussian：
+
+- footprint 很大
+- 误差信号又长期下不去
+
+那通常说明：
+
+> 一个 Gaussian 正在试图解释太大一块区域，应该拆成更细的几个。
+
+这时 split 更合理。
+
+### 8.3 Prune：它几乎没贡献了
+
+如果某个 Gaussian 长期表现成：
+
+- `alpha` 很低
+- 可见贡献几乎没有
+- 或者尺度已经退化
+
+那删掉它通常更好，因为它会白白增加：
+
+- 显存压力
+- 排序和 tile 分配开销
+- 每像素 blending 负担
+
+所以 prune 的真正作用是：
+
+> 把表示预算收回来，交给更有用的区域。
+
+---
+
+## 九、为什么 densify / prune 不该每一步都做
+
+### 9.1 单步梯度太噪
+
+每个 step 常常只采一个视角，或者只看一个很小 batch。于是该步梯度会强烈受到：
+
+- 当前视角
+- 当前遮挡关系
+- 当前局部纹理
+
+影响。
+
+所以如果你每一步都根据瞬时梯度做结构增删，系统会非常抖。
+
+### 9.2 更稳的做法：缓存梯度统计，再周期性决策
+
+工程上更常见的是：
+
+- 连续训练若干步
+- 缓存或累计梯度统计
+- 每隔 `densify_interval` 才做一次结构编辑
+
+例如可以粗略写成：
+
 ```python
 if step % densify_interval == 0:
-    # 缓存最近一次反向传播的梯度（代表过去 1000 步的平均趋势）
-    grads_mu_cache = gaussians.mu.grad.detach().norm(dim=1)  # (N,)
-    radii_cache = radii.detach()  # (N,)
+    grads_mu = gaussians.mu.grad.detach().norm(dim=1)
+    radii_cache = radii.detach()
+    densify_and_prune(gaussians, grads_mu, radii_cache)
 ```
 
-**关键洞察**：densify_interval 越大，缓存越稳定，但响应越慢。3DGS 选择 **1000 步**作为平衡点。
+这不是在说“只看一次梯度就够了”，而是在强调：
+
+> 结构编辑必须建立在比单步更稳的信号上。
+
+### 9.3 还有一个现实问题：参数数量一变，优化器状态就变了
+
+一旦高斯数目变化，参数张量就跟着变化。
+
+这会影响 Adam 一类优化器内部的：
+
+- 一阶动量
+- 二阶统计
+
+所以结构编辑不是“免费操作”，而是会打断一部分连续优化节奏。
+
+这也是为什么它更适合作为周期性阶段动作，而不是每一步都插进去。
 
 ---
 
-#### 矛盾 3：全局排序 vs Tile-based 并行渲染
+## 十、为什么学习率调度在训练闭环里也很重要
 
-**问题浮现**：
-- Alpha blending 需要**从后往前**混合（深度顺序）
-- Tile-based 渲染是**每个 tile 独立处理**（并行化优化）
-- **如何保证每个 tile 内的高斯顺序是全局深度顺序的子集？**
+训练前期和后期，系统面临的问题并不一样。
 
-让我们画个图理解这个问题：
+### 10.1 前期：主要任务是把结构拉到位
 
+这时常常：
+
+- 位置还比较粗
+- 表示容量在增长
+- 很多区域还没进入细调阶段
+
+所以通常更适合相对积极的学习率。
+
+### 10.2 后期：主要任务是收敛和清理
+
+到后面，场景大结构已经差不多成形，再用前期那种学习率，常见问题就是：
+
+- 抖
+- 收敛不稳
+- 细节总是在最佳点附近来回晃
+
+所以一个常见做法是阶段式衰减：
+
+```text
+step in decay_steps -> lr *= gamma
 ```
-全局高斯列表（按深度排序）: [g1, g2, g3, ..., gN] (z_ascending)
-                              ↓ 投影到屏幕空间
-Tile A (左上): 需要 {g1, g5, g8} → 顺序是 [g1, g5, g8] ✓
-Tile B (右上): 需要 {g2, g3, g6} → 顺序是 [g2, g3, g6] ✓
-...
+
+例如：
+
+```text
+7500 步、15000 步时各衰减一次
 ```
 
-**解决方案**（3DGS 的设计）：
-1. **阶段 1**：全局排序一次（所有高斯按深度 argsort），得到 `sorted_gaussians`
-2. **阶段 2**：将 sorted_gaussians 投影到屏幕空间，计算每个高素覆盖哪些 tiles
-3. **阶段 3-4**：每个 tile 从 sorted_gaussians 中分配高斯（保持全局顺序）
+这背后的直觉很简单：
 
-**性能分析**：排序 O(N log N) ≈ 5-10ms（N=1M），相比渲染时间可接受。
+> 前期要快，后期要稳。
 
 ---
 
-### 第三步：设计完整训练循环（Solution Path）
+## 十一、一个更完整的训练伪代码
 
-#### 状态机设计
-
-```
-[初始化] → gaussians = init_from_sfm(...)
-     ↓
-[优化器构建] → optimizer = Adam(params, lr=...)
-     ↓
-┌─────────────────────────────────────┐
-│ for step in range(total_steps):     │ ← 主循环
-│     ├─→ 采样视角 (gt_image, camera) │
-│     ├─→ 前向渲染 (rendered, radii)  │
-│     ├─→ 计算损失 L_total            │
-│     ├─→ 反向传播 loss.backward()    │
-│     ├─→ 优化器更新 optimizer.step() │
-│     ├─→ [step % 1000 == 0]          │
-│     │   ├─→ 缓存梯度 grads_cache    │
-│     │   ├─→ Densify（分裂/克隆）    │
-│     │   └─→ Prune（删除无贡献高斯） │
-│     ├─→ [step in decay_steps]       │
-│     │   └─→ LR × 0.1                │
-│     └─→ [step % 100 == 0]           │
-│         └─→ 日志 PSNR, N, loss      │
-└─────────────────────────────────────┘
-     ↓
-[收敛判断] → PSNR 连续 1000 步变化 < 0.1 dB?
-     ↓ 是
-[结束训练]
-```
-
----
-
-#### 核心算法（伪代码）
+下面这段伪代码，把前面分散的东西串起来：
 
 ```python
-# ============ 超参数配置 ============
 config = {
-    # 训练控制
-    "total_steps": 30000,           # 总步数
-    "log_interval": 100,            # 日志间隔
-    
-    # 密度控制
-    "densify_interval": 1000,       # densify/prune 每 N 步执行一次
-    "densify_from": 500,            # step > 500 才开始 densify（避免初期不稳定）
-    "prune_from": 15000,            # step > 15k 才开始 prune（前期多保留高斯）
-    
-    # 密度控制阈值
-    "grad_threshold": 0.0002,       # 梯度范数阈值 → densify 触发条件
-    "scale_threshold": 0.01,        # 投影尺度阈值（像素）→ split vs clone
-    "prune_alpha": 0.001,           # α < threshold → prune
-    "max_gaussians": 2e6,           # 数量上限保护
-    
-    # LR 调度
-    "lr_decay_steps": [7500, 15000],# 衰减点
-    "lr_decay_factor": 0.1,         # 每次衰减 ×0.1
-    
-    # 损失权重
-    "lambda_dssim": 0.2,            # 结构项权重（L_img = (1-λ)L1 + λ·(1-SSIM)）
+    'total_steps': 30000,
+    'densify_interval': 1000,
+    'densify_from': 500,
+    'prune_from': 15000,
+    'lambda_dssim': 0.2,
+    'lr_decay_steps': [7500, 15000],
+    'lr_decay_factor': 0.1,
 }
 
-# ============ 初始化 ============
-gaussians = init_from_sfm(...)  # 第 6 章：从 SfM 脚手架初始化
+gaussians = init_from_sfm(...)
+optimizer = build_adam_for_gaussians(gaussians)
 
-optimizer = torch.optim.Adam([
-    {"params": gaussians.mu, "lr": 1.6e-4},   # 位置 LR 最小（精细调整）
-    {"params": gaussians.Sigma, "lr": 1e-3},  # 协方差中等 LR
-    {"params": gaussians.alpha, "lr": 5e-2},  # α范围小，需要大 LR
-    {"params": gaussians.color, "lr": 5e-3},  # 颜色易调，中等 LR
-])
+for step in range(config['total_steps']):
+    gt_image, camera = dataset.sample()
 
-# 缓存（用于 densify）
-grads_mu_cache = None
-radii_cache = None
+    rendered, radii = render(gaussians, camera)
 
-# ============ 主训练循环 ============
-for step in range(config["total_steps"]):
-    # --- 1. 采样视角 ---
-    gt_image, camera = dataset.sample()  # (H, W, 3) + {K, R, t}
-    
-    # --- 2. 前向渲染 ---
-    rendered, radii = render(gaussians, camera)  
-    # rendered: (H, W, 3), radii: (N,) → 每个高斯在屏幕空间的投影半径（像素）
-    
-    # --- 3. 损失计算 ---
-    L1 = F.l1_loss(rendered, gt_image)
-    L_ssim = 1 - ms_ssim(rendered, gt_image)
-    L_img = (1 - config["lambda_dssim"]) * L1 + config["lambda_dssim"] * L_ssim
-    
-    # 正则化：惩罚过大的尺度（防止高斯"爆炸"）
-    scales = gaussians.get_scales()  # (N, 3)
-    L_scale = torch.clamp(scales - 1.0, min=0).mean()
-    
-    L_total = L_img + 0.01 * L_scale
-    
-    # --- 4. 反向传播 ---
+    l1 = l1_loss(rendered, gt_image)
+    l_ssim = 1 - ssim(rendered, gt_image)
+    l_img = (1 - config['lambda_dssim']) * l1 + config['lambda_dssim'] * l_ssim
+
     optimizer.zero_grad()
-    L_total.backward()  # grads_mu[i] ← ∂L/∂μ_i, grads_Sigma[i] ← ∂L/∂Σ_i
-    
-    # --- 5. 缓存梯度（用于 densify）---
-    if step % config["densify_interval"] == 0:
-        grads_mu_cache = gaussians.mu.grad.detach().norm(dim=1)  # (N,)
-        radii_cache = radii.detach()  # (N,)
-    
-    # --- 6. 优化器更新 ---
+    l_img.backward()
     optimizer.step()
-    
-    # --- 7. 密度控制（每 1000 步）---
-    if step % config["densify_interval"] == 0 and step >= config["densify_from"]:
-        densify_and_prune(gaussians, grads_mu_cache, radii_cache, optimizer, config)
-    
-    # --- 8. LR 调度 ---
-    if step in config["lr_decay_steps"]:
-        for param_group in optimizer.param_groups:
-            param_group["lr"] *= config["lr_decay_factor"]
-    
-    # --- 9. 日志 ---
-    if step % config["log_interval"] == 0:
-        psnr = 10 * torch.log10(1.0 / L1.item())
-        print(f"Step {step}: PSNR={psnr:.2f}, Loss={L_total:.4f}, "
-              f"#gaussians={len(gaussians)}, LR={optimizer.param_groups[0]['lr']:.2e}")
 
-# ============ 辅助函数：密度控制 ============
-def densify_and_prune(gaussians, grads_mu_cache, radii_cache, optimizer, config):
-    """每 1000 步执行一次：densify（分裂/克隆）+ prune（删除）"""
-    
-    # --- Densify: 增加高斯 ---
-    if step < config["prune_from"]:  # 前期只 densify，不 prune
-        # 条件：投影尺度大 + 梯度大 → 该区域需要更多表示
-        scale_condition = radii_cache > config["scale_threshold"]
-        grad_condition = grads_mu_cache > config["grad_threshold"]
-        
-        densify_mask = scale_condition & grad_condition
-        indices_to_densify = torch.where(densify_mask)[0]
-        
-        new_gaussians = []
-        for i in indices_to_densify:
-            # 判断：尺度大 → split；尺度小 → clone
-            if radii_cache[i] > config["scale_threshold"]:
-                g1, g2 = split_gaussian(gaussians, i)  # 分裂成两个
-                new_gaussians.extend([g1, g2])
-            else:
-                g_new = clone_gaussian(gaussians, i)   # 克隆一个
-                new_gaussians.append(g_new)
-        
-        if new_gaussians:
-            gaussians.extend(new_gaussians)
-            optimizer = rebuild_optimizer(gaussians, config)  # N 变了，重建优化器
-    
-    # --- Prune: 删除高斯 ---
-    if step >= config["prune_from"]:  # 后期开启 prune
-        # 条件：α太小（透明）或 尺度太小（退化）
-        alpha_mask = gaussians.squeeze_alpha() < config["prune_alpha"]
-        scales = gaussians.get_scales().max(dim=1)[0]
-        scale_mask = scales < 1e-6
-        
-        prune_mask = alpha_mask | scale_mask
-        
-        if prune_mask.any():
-            gaussians = gaussians[~prune_mask]  # 删除被 mask 的高斯
-            optimizer = rebuild_optimizer(gaussians, config)
-    
-    # --- 数量上限保护 ---
-    if len(gaussians) > config["max_gaussians"]:
-        n_remove = len(gaussians) - int(config["max_gaussians"])
-        indices_to_keep = torch.randperm(len(gaussians))[n_remove:]
-        gaussians = gaussians[indices_to_keep]
-        optimizer = rebuild_optimizer(gaussians, config)
-    
-    return gaussians, optimizer
+    if step % config['densify_interval'] == 0 and step >= config['densify_from']:
+        grads_mu = gaussians.mu.grad.detach().norm(dim=1)
+        gaussians = densify_or_split_if_needed(gaussians, grads_mu, radii)
 
-def split_gaussian(gaussians, idx):
-    """分裂高斯：沿主方向分成两个"""
-    Sigma = gaussians.Sigma[idx]  # (3, 3)
-    eigvals, eigvecs = torch.linalg.eigh(Sigma)
-    
-    # 主方向（最大特征值对应的特征向量）
-    main_dir = eigvecs[:, -1]  # (3,)
-    
-    # 新尺度 = √(λ_i / 2) → 保持总体积不变
-    new_scales = torch.sqrt(eigvals / 2.0)
-    new_Sigma = eigvecs @ torch.diag(new_scales**2) @ eigvecs.T
-    
-    # 新位置 = μ ± 0.01·主方向（微小偏移）
-    offset = 0.01 * main_dir
-    mu1 = gaussians.mu[idx] + offset
-    mu2 = gaussians.mu[idx] - offset
-    
-    return Gaussian(mu1, new_Sigma, gaussians.alpha[idx], gaussians.color[idx]), \
-           Gaussian(mu2, new_Sigma, gaussians.alpha[idx], gaussians.color[idx])
+    if step >= config['prune_from']:
+        gaussians = prune_inactive_gaussians(gaussians)
 
-def clone_gaussian(gaussians, idx):
-    """克隆高斯：直接复制"""
-    return Gaussian(
-        mu=gaussians.mu[idx].clone(),
-        Sigma=gaussians.Sigma[idx].clone(),
-        alpha=gaussians.alpha[idx].clone(),
-        color=gaussians.color[idx].clone()
-    )
+    if step in config['lr_decay_steps']:
+        decay_learning_rate(optimizer, config['lr_decay_factor'])
 
-def rebuild_optimizer(gaussians, config):
-    """重建 Adam 优化器（参数数量变化后）"""
-    # 注意：这里会丢失动量状态，但 densify_interval=1000 步时影响可接受
-    return torch.optim.Adam([
-        {"params": gaussians.mu, "lr": get_current_lr(config)},
-        {"params": gaussians.Sigma, "lr": get_current_lr(config) * 6.25},
-        {"params": gaussians.alpha, "lr": get_current_lr(config) * 312.5},
-        {"params": gaussians.color, "lr": get_current_lr(config) * 31.25},
-    ])
+    if step % 100 == 0:
+        log_training_state(step, l1, l_img, gaussians)
+```
+
+注意这段伪代码最重要的不是具体函数名，而是结构顺序：
+
+```text
+采样
+-> 渲染
+-> 损失
+-> 反向
+-> 连续更新
+-> 周期性结构编辑
+-> 学习率调度
+-> 日志诊断
+```
+
+这就是第 7 章最想让你抓住的骨架。
+
+---
+
+## 十二、训练循环里最常见的四种失败模式
+
+真正做训练时，最可怕的不是公式不懂，而是系统已经出事，你却不知道它是在什么层面出的问题。
+
+### 12.1 症状一：loss 不怎么降，PSNR 很快卡住
+
+常见原因：
+
+- 初始化太差，脚手架本身不在可训练区间
+- 学习率太小，系统根本不动
+- densify 触发太少，表示容量不够
+
+这类问题本质上是在说：
+
+> 系统想学，但当前自由度不够，或者根本没被推起来。
+
+### 12.2 症状二：Gaussian 数量疯狂增长
+
+常见原因：
+
+- densify 阈值太激进
+- prune 太慢或根本没起作用
+- 训练一直在“补表示”，却没进入收敛阶段
+
+这类问题的本质是：
+
+> 系统一直在扩容，却没有把旧表示清理掉。
+
+### 12.3 症状三：图像发白、发糊，或者 opacity collapse
+
+常见原因：
+
+- `alpha` 整体偏高，前排高斯吃掉太多透射率
+- footprint 太大，局部结构全被糊掉
+- 学习率过大导致透明度不稳定
+
+这说明问题更多出在：
+
+```text
+遮挡和混合层面
+```
+
+### 12.4 症状四：协方差爆炸或数值不稳
+
+常见原因：
+
+- scale 参数跑飞
+- 极端 footprint 让局部线性近似变差
+- `Sigma_2d` 变得接近奇异
+
+这类问题提醒你：
+
+> 第 4 章那条可微渲染链虽然成立，但它需要被数值稳定地运行。
+
+---
+
+## 十三、训练时最值得盯的四类曲线
+
+如果你只看一张最终图，很容易误判系统状态。真正有用的是看过程指标。
+
+### 13.1 `PSNR / L1 / L_img`
+
+它们告诉你：
+
+- 图像质量是不是还在整体变好
+- 收敛是在继续，还是已经平台期
+
+### 13.2 Gaussian 数量 `N`
+
+它告诉你：
+
+- densify 是否真的在工作
+- prune 有没有把冗余结构收回来
+- 模型是不是在失控膨胀
+
+### 13.3 `alpha` 分布
+
+它告诉你：
+
+- 系统是不是在大量生成几乎透明的“死 Gaussian”
+- opacity 是否整体过高，导致前排压死后排
+
+### 13.4 `scale` 分布
+
+它告诉你：
+
+- Gaussian 是否越来越细化
+- 有没有出现一批异常大的 footprint
+- 是否有大量退化到几乎不可见的结构
+
+如果把最常见的训练图景压成一句话，就是：
+
+```text
+PSNR 慢慢上去
+N 前期上升、中后期趋稳
+alpha 和 scale 分布逐渐从粗糙走向分化和收敛
 ```
 
 ---
 
-## ✅ Verification：怎么判断训练成功或失败？
+## 十四、一个最小可运行实验：把训练曲线直觉先画出来
 
-### 收敛标准（定量）
-
-| 指标 | 计算方法 | 收敛条件 | 说明 |
-|------|---------|---------|------|
-| **PSNR** | 10·log₁₀(1/L1) | >30 dB（合成数据）/ >25 dB（实景） | 连续 1000 步变化 < 0.1 dB → 收敛 |
-| **高斯数量 N** | len(gaussians) | 稳定在 [10⁵, 10⁶] | 连续 1000 步波动 < 1% → 收敛 |
-| **总损失 L_total** | L_img + λ·L_reg | 持续下降 | 连续 1000 步变化 < 0.001 → 收敛 |
-
-**满足以上任意两条** → 认为训练成功。
-
----
-
-### 失败诊断表
-
-```
-+------------------+------------------+------------------------+---------------------------+
-| 症状             | 可能原因         | 检查点                 | 解决方案                  |
-+------------------+------------------+------------------------+---------------------------+
-| PSNR 不升        | LR 太小          | grads.mu.norm() ≈ 0    | LR ×10                    |
-| (卡在低值)       | 初始化差         | 初始渲染图 vs 真实图   | scale_factor ×5-10        |
-|                  | 梯度消失         | Sigma.det() ≈ 0        | Sigma += I·1e-8           |
-+------------------+------------------+------------------------+---------------------------+
-| 高斯数量爆炸     | densify 太激进   | N 增长曲线             | grad_threshold ↑          |
-| (N > 10M)        |                  |                        | max_gaussians ↓           |
-+------------------+------------------+------------------------+---------------------------+
-| 渲染全黑         | Σ太小            | scales.mean() < 1e-6   | scale_factor ×10          |
-|                  | α≈0              | alpha.mean()           | alpha.clamp(min=0.01)     |
-+------------------+------------------+------------------------+---------------------------+
-| 渲染全白         | Σ太大            | scales.mean() > 100    | scale_factor ÷2           |
-|                  | α≈1              | alpha.mean() ≈ 1       | alpha.clamp(max=0.9)      |
-+------------------+------------------+------------------------+---------------------------+
-| 条纹伪影         | Σ奇异（det≈0）   | Sigma.eigvals()        | Sigma += I·1e-8           |
-+------------------+------------------+------------------------+---------------------------+
-| 空洞不愈合       | densify 不触发   | grads_mu_cache.max()   | grad_threshold ↓          |
-|                  |                  | radii_cache.max()      | scale_threshold ↓         |
-+------------------+------------------+------------------------+---------------------------+
-```
-
----
-
-## 📊 Example：训练曲线可视化
-
-### 必须记录的指标（TensorBoard/WandB）
+下面这段代码不跑真实 3DGS，而是先把“训练闭环里最值得监控的曲线长什么样”可视化出来。
 
 ```python
-# TensorBoard 日志示例
-from torch.utils.tensorboard import SummaryWriter
+import numpy as np
+import matplotlib.pyplot as plt
 
-writer = SummaryWriter("runs/3dgs_training")
+steps = np.arange(30000)
 
-for step in range(total_steps):
-    # ... 训练代码 ...
-    
-    if step % config["log_interval"] == 0:
-        writer.add_scalar("metrics/psnr", psnr, step)
-        writer.add_scalar("metrics/l1_loss", L1.item(), step)
-        writer.add_scalar("metrics/ssim_loss", L_ssim.item(), step)
-        writer.add_scalar("gaussians/count", len(gaussians), step)
-        writer.add_scalar("gaussians/alpha_mean", gaussians.alpha.mean().item(), step)
-        writer.add_scalar("gaussians/scale_mean", scales.mean().item(), step)
-        
-        # 梯度统计（诊断用）
-        if gaussians.mu.grad is not None:
-            writer.add_histogram("grads/mu", gaussians.mu.grad, step)
+# 造一组很像 3DGS 训练过程的 toy 曲线
+psnr = 12 + 19 * (1 - np.exp(-steps / 6000))
+psnr += 1.2 * (1 - np.exp(-np.maximum(steps - 12000, 0) / 5000))
+
+loss = 0.55 * np.exp(-steps / 5000) + 0.08
+
+N = 12000 + 90000 * (1 - np.exp(-steps / 8000))
+N -= 18000 * (1 - np.exp(-np.maximum(steps - 18000, 0) / 4000))
+
+alpha_mean = 0.45 - 0.12 * (1 - np.exp(-steps / 12000))
+scale_mean = 0.35 - 0.20 * (1 - np.exp(-steps / 9000))
+
+fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+
+axes[0, 0].plot(steps, psnr)
+axes[0, 0].set_title('PSNR vs step')
+axes[0, 0].set_xlabel('step')
+axes[0, 0].set_ylabel('PSNR (dB)')
+
+axes[0, 1].plot(steps, loss)
+axes[0, 1].set_title('loss vs step')
+axes[0, 1].set_xlabel('step')
+axes[0, 1].set_ylabel('loss')
+
+axes[1, 0].plot(steps, N)
+axes[1, 0].set_title('number of gaussians')
+axes[1, 0].set_xlabel('step')
+axes[1, 0].set_ylabel('N')
+
+axes[1, 1].plot(steps, alpha_mean, label='alpha mean')
+axes[1, 1].plot(steps, scale_mean, label='scale mean')
+axes[1, 1].set_title('alpha / scale trends')
+axes[1, 1].set_xlabel('step')
+axes[1, 1].legend()
+
+plt.tight_layout()
+plt.show()
 ```
 
+你应该观察到：
+
+- `PSNR` 前期上升快，后期趋缓，这是典型收敛曲线
+- `loss` 应该整体下降，而不是长期剧烈震荡
+- `N` 往往前期增长，后期趋稳甚至略回落，对应 densify 后再 prune
+- `alpha` 和 `scale` 的统计趋势能帮助你看出系统是不是在“越学越稳”还是“已经开始跑飞”
+
+这段代码虽然是 toy，但它非常适合作为第 7 章的第一层直觉训练。
+
 ---
 
-### 典型训练曲线（合成数据）
+## 十五、把整章压成一个最短心智模型
 
-```
-PSNR vs Step:
-35 ┤                                   ╭────╮
-   │                               ╭───╯    ╰────
-30 ┤                         ╭─────╯
-   │                     ╭───╯
-25 ┤               ╭─────╯
-   │           ╭───╯
-20 ┤     ╭─────╯
-   │ ╭───╯
-15 ┼─╯
-   └────────────────────────────────────────────
-    0k  5k  10k 15k 20k 25k 30k (steps)
+如果你只想记一条链，就记这个：
 
-N (#gaussians) vs Step:
-2M ┤                                   ╭───────╮
-   │                               ╭───╯       ╰────
-1.5M┤                         ╭─────╯
-   │                     ╭───╯
-1M ┤               ╭─────╯
-   │           ╭───╯
-0.5M┤     ╭─────╯
-   │ ╭───╯
-0  ┼─╯
-   └────────────────────────────────────────────
-    0k  5k  10k 15k 20k 25k 30k (steps)
+```text
+第 6 章给的是第一批可训练 Gaussian 脚手架
 
-Loss vs Step:
-0.5 ┤╭────
-   ││
-0.4 ┤│
-   ││
-0.3 ┤│    ╰───────────
-   ││
-0.2 ┤│
-   │╰
-0.1 ┼──
-   └────────────────────────────────────────────
-    0k  5k  10k 15k 20k 25k 30k (steps)
+    ↓
 
-LR vs Step:
-5e-2┤─────────────╮
-   │             ╰─────────────╮
-5e-3┤                          ╰──────
-   │                                
-1.6e-4┼───────────────────────────────
-   └────────────────────────────────────────────
-    0k     7.5k        15k       30k (steps)
+每个训练 step 都在做：
+采样视角 -> 渲染 -> 图像损失 -> 反向传播 -> optimizer 更新
+
+    ↓
+
+但连续调参还不够
+因为表示容量本身也要在训练中被不断重分配
+
+    ↓
+
+所以每隔一段时间，系统还会根据梯度和 footprint 做 densify / split / prune
+
+    ↓
+
+前期更像“搭结构”
+中期更像“细化”
+后期更像“收敛 + 清理”
+
+    ↓
+
+日志、曲线和可视化不是附属品
+而是判断系统正在学、还是已经出事的主要窗口
 ```
 
-**观察要点**：
-1. **PSNR**：初期快速上升，后期缓慢收敛 → 检查是否满足收敛条件
-2. **N（高斯数量）**：前期增长快，后期稳定或下降 → densify/prune 在正常工作
-3. **Loss**：应该持续下降，无剧烈震荡 → 如果震荡说明 LR 太大
-4. **LR**：阶梯式衰减，每次衰减后观察 PSNR 是否继续上升
+这就是 3DGS 训练闭环最值得记住的主线。
 
 ---
 
-## 🧠 思考题（第一性原理式）
+## 十六、本章你真正应该能自己重建的几个问题
 
-### Q1: 为什么 densify 用缓存的梯度，不用当前步的？
+读完以后，遮住正文，你至少应该能自己回答：
 
-**提示链**：
-- 当前步梯度 = ∂L/∂θ | θ=当前参数，batch=当前视角
-- 如果 batch size = 1（单视角），梯度的方差有多大？
-- 缓存 N 步平均后，方差降低多少倍？
-- **推导**：假设每步采样独立，方差 σ² → N 步平均后方差 σ²/N
+1. 为什么 3DGS 训练循环不是“普通可微渲染 + Adam”这么简单？
+2. 为什么连续参数更新和结构编辑必须同时存在？
+3. 为什么图像误差只能回答“哪里不像”，却不能直接回答“该加几个 Gaussian”？
+4. 为什么 3D 尺度、2D footprint 半径和梯度阈值不是一回事？
+5. 为什么 densify / prune 必须建立在更稳的统计信号上，而不是单步梯度上？
+6. 为什么训练前期和后期需要不同的学习率和不同的结构策略？
+7. 为什么曲线和可视化在 3DGS 训练里不是附属品，而是核心诊断工具？
+8. 如果 PSNR 不升、N 爆炸、图像发糊，你应该首先怀疑训练闭环的哪一层？
 
----
-
-### Q2: LR 调度的"经济学"
-
-**提示链**：
-- Adam 的自适应 LR 已经考虑了梯度统计（v_t），为什么还需要全局调度？
-- 从**收敛性证明**的角度：如果 θ*是最优解，‖θ_t - θ*‖ = η_t · ‖∇L(θ*)‖ + O(η²)
-- **推导**：当 t → ∞时，需要 lim η_t = 0（但不要太快）→ 阶梯衰减 vs 线性衰减的收敛速率比较
+如果这些问题你能自己讲回来，这一章就真的进入你的脑子了。
 
 ---
 
-### Q3: Adam vs SGD
+## 十七、下一章接什么
 
-**提示链**：
-- μ、Σ、α、c 四个参数的梯度量级分别是多少？（从训练日志看）
-- 如果用 SGD，需要手动设置多少个不同的 LR？
-- **推导**：假设‖∇μ‖ ≈ 1e-4, ‖∇α‖ ≈ 1e-2，用同一个 LR=1e-3 会怎样？
+现在你已经知道：
 
----
+- 第一批 Gaussian 怎样被放进场景
+- 训练循环怎样让它们逐步收敛
+- densify / split / prune 怎样在训练中重分配表示容量
 
-### Q4: 早停策略（Early Stopping）
+下一章 [chapter_08_inference_optimization.md](chapter_08_inference_optimization.md) 会自然接到另一个工程问题：
 
-**提示链**：
-- 当前是固定步数（30k），但不同场景收敛速度不同
-- **设计任务**：如何自适应判断"训练完成"？
-  - 如果 PSNR 连续 N 步变化 < ε，可以停吗？会不会陷入局部最优？
-  - 如果用验证集 PSNR（不在训练集中的视角）作为停止条件，如何实现？
+> 训练完以后，这套 Gaussian 已经学会了场景。但为什么直接拿训练时那套前向代码去渲染，常常还是慢得没法实时用？
 
----
+也就是从：
 
-### Q5: "死亡"高斯的复活机制
+```text
+“怎么学会”
+```
 
-**提示链**：
-- 如果一个高斯长期梯度为 0（‖∇θ‖ ≈ 0），它永远不会被更新 → "死亡"
-- **设计任务**：如何检测并处理死亡高斯？
-  - 方案 A：定期重置随机子集的参数？
-  - 方案 B：基于密度估计，在梯度为 0 的区域添加新高斯？
-  - 从信息论角度：梯度为 0 意味着该参数对损失不敏感（∂L/∂θ = 0），如何重新激活？
+走到：
 
----
-
-## 📝 本章核心记忆点
-
-✅ **训练循环状态机**：采样 → 渲染 → 损失 → 反向 → 更新 → densify/prune → LR 调度 → 日志
-
-✅ **密度控制时机**：每 1000 步，缓存梯度 + 投影半径，基于双条件（尺度 + 梯度）决策
-
-✅ **学习率调度**：三阶段衰减（7.5k、15k 步 ×0.1），分参数组（μ、Σ、α、c 不同 LR）
-
-✅ **收敛判断**：PSNR 连续 1000 步变化 < 0.1 + N 稳定在合理范围
-
-✅ **关键洞察**：densify/prune 需要缓存梯度（避免噪声），优化器需要重建（参数数量变）
-
----
-
-## 🚀 下一章预告
-
-训练完成后，你有了高质量的高斯场景。但怎么实现**实时推理**（<10ms/帧）？
-
-第 8 章我们将深入：
-- **CUDA kernel 融合**：投影 + 排序 + 混合渲染如何优化成一个 kernel？
-- **内存布局优化**：SoA vs AoS，缓存友好性设计
-- **Batch 推理**：多视角同时渲染的并行策略
-- **生产部署**：从 PyTorch 到 TensorRT/CUDA C++
-
-准备好燃烧更多 GPU 显存了吗？🔥
+```text
+“学会之后，怎么跑快”
+```

@@ -1,627 +1,1009 @@
-# 第 9 章：从零到可运行——为什么"调库跑通"不等于理解？
+# 第 9 章：如果你要自己实现 3DGS，第一步该先写什么，怎么验证，卡住时该看哪里
 
-**学习路径**: `problem → invention → verification`
+**本章核心问题**：前面几章已经分别解释了：
 
----
+- 第 3 章：为什么 primitive 选 Gaussian
+- 第 4 章：Gaussian 怎样被渲染成图
+- 第 5 章：优化目标为什么这样设计
+- 第 6 章：第一批 Gaussian 从哪来
+- 第 7 章：训练闭环怎样工作
+- 第 8 章：为什么推理还需要专门优化
 
-## 问题：你调通了官方代码，但真的懂吗？
+现在问题变成：
 
-你在 GitHub 上 clone 了 `matthias-research/3d-gaussian-splatting`, 运行`python train.py -s data/chair`, 看到 PSNR 从 10 飙升到 32。很酷对吧？
+> 如果你不想只停留在“我看懂了原理”，而是想自己从零搭一版能工作的 3DGS，应该按什么顺序把这些知识落成代码？为什么实现顺序本身，就是工程成败的一部分？
 
-然后面试官问你:**"如果我把 densify_interval 从 1000 改成 100，会发生什么？**"
+如果前面几章解决的是：
 
-你卡住了。因为你只知道它在哪行代码，不知道**为什么要设计成 1000**。
-
-或者你想加个新特性——比如动态场景支持。你打开 `shaders/` 文件夹，看到满屏的 CUDA kernel，完全无从下手。**因为你的知识是黑盒式的：知道"怎么跑",不知道"为什么这样"**。
-
-**这就是调库和实现的本质区别**。
-
----
-
-## 起点：从零实现 vs 调库
-
-### 两种路径对比
-
-```
-路径 A: 调库
-  clone → run → PSNR↑ → "懂了"
-  ✅ 30 分钟搞定 demo
-  ❌ 改不了，不懂原理，换个场景就懵
-
-路径 B: 从零实现
-  设计数据格式 → 写投影公式 → 调渲染 bug → loss 不降 → fix 梯度
-  ❌ 要花 2-3 周
-  ✅ 每一行代码都知道为什么存在
+```text
+为什么它能表示
+为什么它能渲染
+为什么它能训练
+为什么它还能跑快
 ```
 
-**选择**:我们要的是理解，不是黑盒。
+那么这一章解决的就是：
 
----
-
-### 你会学到什么？（不是"学会 3DGS",而是更深的东西）
-
-1. **调试复杂系统的能力**——渲染全黑、loss NaN、梯度消失，每个问题都在逼你理解底层机制
-2. **从数学公式到代码的映射**——`J·Σ·Jᵀ`怎么变成 `torch.matmul()`？特征值分解怎么写稳定？
-3. **性能优化的直觉**——为什么 Tile-based 比朴素版快 50×？缓存策略什么时候失效？
-4. **增量验证的工程哲学**——每写一个函数立即测试，而不是写完再调试
-
----
-
-## 发明：如何设计一个"能学到东西"的实现路径？
-
-### 矛盾一："完整功能"vs"学习曲线陡峭"
-
-**问题**:官方的 3DGS 有:
-- COLMAP 解析 + 数据加载
-- GaussianModel + 参数初始化
-- 可微渲染（CUDA kernel）
-- 密度控制（split/clone/prune）
-- 训练循环 + 学习率调度
-- 评估脚本
-
-新手一次性啃全 → **overwhelmed**,三天后放弃。
-
-**你的方案**:分阶段 MVP,每阶段只学一个核心概念:
-
-```
-Phase 1 (Week 1): "看到东西"
-  ✅ 数据加载（COLMAP）
-  ✅ 高斯初始化
-  ✅ 慢速渲染 O(N·H·W) —— 不求快，只求数学正确
-  ✅ L1 损失 + Adam 优化
-  ❌ 不要 densify, 不要 SSIM, 不要 Tile
-
-Phase 2 (Week 2): "让它工作"
-  ✅ Tile 预筛选（速度↑50×）
-  ✅ 密度控制（N 增长，质量↑）
-  ✅ SSIM + L1 组合损失
-  ✅ 完整训练循环（30k 步）
-
-Phase 3 (Week 3): "榨干性能"
-  ✅ float16 量化
-  ✅ 缓存策略
-  ✅ torch.compile / CUDA
+```text
+如果我要自己实现
+第一步该先写什么
+每一步该怎么验
+出问题时先怀疑哪一层
 ```
 
-**关键**:每阶段都有明确的"完成标准",不模糊。
+先把主线写在前面：
+
+```text
+真正好的实现路径
+不是按官方仓库的文件夹顺序抄
+也不是一上来就把训练、densify、CUDA 全堆上去
+
+而是按依赖关系一层层搭：
+先做一个能看见的最小前向
+再做一个能下降的最小训练
+再做结构编辑
+最后再做加速和变体
+```
+
+这一章本质上是在做一件事：
+
+> 把第 3 章到第 8 章的“原理地图”，压成一条真正可执行的实现路径。
 
 ---
 
-### 矛盾二:"数学正确"vs"数值稳定"
+## 一、为什么实现顺序本身就是工程问题
 
-**问题**:投影公式 `Sigma_2d = J·(R·Σ·Rᵀ)·Jᵀ` 理论上是完美的。但代码里：
+很多人第一次自己做 3DGS 时，最容易犯的错不是“某条公式不会推”，而是：
+
+```text
+把太多层同时写出来
+于是所有 bug 一起爆
+最后根本不知道该从哪一层开始查
+```
+
+比如你如果一开始就把下面这些全部堆上去：
+
+- COLMAP 数据解析
+- 3D -> 2D 投影
+- front-to-back blending
+- L1 + SSIM
+- densify / split / prune
+- tile mapping
+- mixed precision
+- CUDA kernel
+
+那你一旦看到：
+
+- 图像全黑
+- loss 不降
+- `NaN`
+- 高斯数量爆炸
+- 帧率还很慢
+
+你几乎没法第一时间判断，到底是哪一层先出错。
+
+这就是为什么实现顺序不是“个人习惯”，而是一个真正的工程决策。
+
+### 1.1 这件事很像搭一座桥，不像拼乐高
+
+乐高错一块，通常只影响局部。
+
+但 3DGS 更像搭桥：
+
+- 基础坐标系一旦错，后面投影全错
+- 投影一旦错，render 再快也只是更快地产生错误图像
+- render 一旦不对，loss 再漂亮也只是把错误信号往回传
+- 训练闭环一旦没站住，densify 就会把错误结构放大
+
+所以正确顺序不是：
+
+```text
+功能越全越好
+```
+
+而是：
+
+```text
+每一层都先做成一个可验证的小闭环
+再往上叠下一层
+```
+
+### 1.2 这也是为什么“先跑通官方代码”不等于“我会实现”
+
+跑通官方代码当然有价值，因为它能让你看到：
+
+- 数据长什么样
+- 最终效果大概是什么级别
+- 常见训练超参数怎么设
+
+但它给你的更多是：
+
+```text
+黑盒使用经验
+```
+
+而不是：
+
+```text
+如果我要自己写
+我知道先搭哪块骨架
+以及这块骨架该怎么验
+```
+
+第 9 章的任务，就是把这件事讲清楚。
+
+---
+
+## 二、先把整条实现路径压成一页图
+
+如果把整套实现顺序压成最短版本，可以先记这条链：
+
+```text
+Milestone A
+先做 2D Gaussian footprint + alpha blending 的最小沙盒
+
+    ↓
+
+Milestone B
+把 3D Gaussian 接上相机投影
+确认 mu_2d / Sigma_2d 真能落到图像上
+
+    ↓
+
+Milestone C
+做最小可微训练闭环
+先只用简单 loss，让图像真的开始变好
+
+    ↓
+
+Milestone D
+接真实数据和 SfM 初始化
+让系统进入多视图训练状态
+
+    ↓
+
+Milestone E
+再加 densify / split / prune
+让表示容量开始动态重分配
+
+    ↓
+
+Milestone F
+最后才做 tile、排序缓存、mixed precision、kernel fusion
+把“能工作”推进到“能高效工作”
+```
+
+这条顺序背后的逻辑非常简单：
+
+> 永远先解决“有没有对”，再解决“学不学得动”，最后才解决“跑得快不快”。
+
+很多实现失败，问题不是努力不够，而是一开始就把顺序反过来了。
+
+---
+
+## 三、把前面六章的公式，映射成真正要写的模块
+
+如果你现在准备开一个自己的实现仓库，最有用的不是先抄官方目录，而是先把“章节概念 -> 代码模块 -> 第一张检查图”对应起来。
+
+| 你要解决的问题 | 核心公式 / 概念 | 建议模块 | 第一个验证结果 |
+|---|---|---|---|
+| 一个 Gaussian 到底存什么 | `G_i = {mu_i, Sigma_i, alpha_i, sh_i}` | `scene/gaussians.py` | 参数 shape 和统计量正常 |
+| 世界坐标怎样进相机 | `mu_cam = R * mu + t` | `render/project.py` | `z > 0` 的点在相机前方 |
+| 3D 椭球怎样变成 2D footprint | `Sigma_cam = R * Sigma * R^T`，`Sigma_2d ≈ J * Sigma_cam * J^T` | `render/project.py` | 投影椭圆覆盖在物体轮廓附近 |
+| 像素怎样被多个高斯混成颜色 | `C(p) = sum_i T_i(p) * w_i(p) * c_i` | `render/blend.py` | 单帧渲染不是全黑也不是全白 |
+| 系统怎样开始学 | `L_img = (1 - lambda_dssim) * L1 + lambda_dssim * (1 - SSIM)` | `train/losses.py` | loss 明显下降 |
+| 第一批高斯从哪来 | SfM 点云 + 初始化启发式 | `data/colmap_loader.py`、`scene/init_from_sfm.py` | 初始 render 有大致轮廓 |
+| 表示容量怎样动态调整 | densify / split / prune | `train/density_control.py` | `N` 曲线先升后稳 |
+| 为什么最终还得做推理优化 | tile / sorting / bandwidth | `render/tile.py`、`tools/profile.py` | 帧时间下降且输出几乎不变 |
+
+你会发现，第 9 章其实没有引入新数学。
+
+它做的是另一种更重要的事：
+
+> 把前面的数学，重新按“实现依赖关系”排序。
+
+---
+
+## 四、第一步为什么不是读 COLMAP，也不是写训练，而是先做一个 2D 沙盒
+
+这一步特别重要，也特别容易被跳过。
+
+很多人觉得：
+
+```text
+3DGS 是 3D 问题
+那当然要先写 3D
+```
+
+但真正更稳的起点常常是：
+
+```text
+先在 2D 里把 footprint 和 blending 这条最小成像链站住
+```
+
+### 4.1 为什么这一步值钱
+
+因为它把问题规模瞬间缩小了。
+
+你暂时不需要考虑：
+
+- 相机外参到底是 world-to-camera 还是 camera-to-world
+- COLMAP 坐标系要不要翻轴
+- `J * Sigma_cam * J^T` 有没有数值问题
+- 多视图 loss 是不是在打架
+
+你只需要确认一件事：
+
+> 如果已经给你一个 `mu_2d`、一个 `Sigma_2d`、一个 `alpha` 和一个颜色，你能不能把它们稳定地混成一张图。
+
+### 4.2 这一层你真正该写的只有三件事
+
+```text
+q(p) = (p - mu_2d)^T * Sigma_2d^(-1) * (p - mu_2d)
+
+g(p) = exp(-1/2 * q(p))
+
+w(p) = alpha * g(p)
+```
+
+再加上第 4 章那条 front-to-back blending：
+
+```text
+T_1(p) = 1
+C(p) = sum_i T_i(p) * w_i(p) * c_i
+T_{i+1}(p) = T_i(p) * (1 - w_i(p))
+```
+
+这一步做完后，你至少应该能验证两件事：
+
+- 调整高斯顺序，叠放关系真的会变
+- 把一个椭圆拉细、旋转，图像局部贡献真的会跟着变
+
+### 4.3 为什么这一层比你想的更关键
+
+因为如果连这一层都没站住，后面很多“3D 问题”其实都没资格讨论。
+
+举个例子：
+
+- 如果你把颜色简单相加，而不是做剩余透射率递推
+- 或者你把 `Sigma_2d` 反了，导致椭圆主轴错位
+
+那你后面即使把相机投影、SfM 初始化、训练循环全部接上，系统也只是在更复杂地犯同一个错。
+
+所以第一个里程碑不是：
+
+```text
+我已经能训练了
+```
+
+而是：
+
+```text
+我已经能稳定地把几个 2D Gaussian 混成正确图像了
+```
+
+这一步是整套实现真正的地基。
+
+---
+
+## 五、第二步：把 2D 沙盒升级成 3D -> 2D 投影链
+
+当地基站住后，才轮到真正接上第 4 章那条投影主链。
+
+这一层的关键不是“一上来就把整张图 render 出来”，而是先确认：
+
+> 3D 世界里的高斯，真的被投到了正确的 2D 位置和正确的 2D 椭圆上。
+
+### 5.1 这一层最核心的三条公式
+
+先是中心变换：
+
+```text
+mu_cam = R * mu_world + t
+```
+
+再是协方差旋转：
+
+```text
+Sigma_cam = R * Sigma_world * R^T
+```
+
+然后是透视投影与局部线性化：
+
+```text
+u = fx * X / Z + cx
+v = fy * Y / Z + cy
+
+J = [[fx / Z, 0, -fx * X / Z^2],
+     [0, fy / Z, -fy * Y / Z^2]]
+
+Sigma_2d ≈ J * Sigma_cam * J^T
+```
+
+### 5.2 这一层最值得先验的，不是最终 render，而是投影调试图
+
+很多人一接上 3D，就急着看“最终画面像不像”。
+
+但更高收益的第一张图其实是：
+
+```text
+把所有高斯中心投到图像平面上
+再把若干 Sigma_2d 对应的椭圆画出来
+```
+
+因为这一张图可以一次暴露很多根问题：
+
+- 整体偏出画面：坐标系或外参方向错
+- 上下翻转 / 左右镜像：轴约定错
+- 椭圆离谱地大：`Z` 太小、scale 太大或 `J` 算错
+- 椭圆接近退化：`Sigma_2d` 正定性没保住
+
+### 5.3 这一层最常见的四个坑
+
+#### 5.3.1 world-to-camera 和 camera-to-world 混了
+
+这会导致你公式写得很像对的，但图永远不落对位置。
+
+#### 5.3.2 `Z` 接近 0 或者在相机后方
+
+于是：
+
+```text
+fx / Z
+```
+
+会直接爆掉。
+
+所以工程上一定会做：
+
+```text
+Z = clamp(Z, min=eps)
+```
+
+并且把明显不在可见范围内的高斯先筛掉。
+
+#### 5.3.3 `Sigma_2d` 数值上接近奇异
+
+理论上这条链是可微的，但数值上不一定稳，所以通常要加：
+
+```text
+Sigma_2d = Sigma_2d + eps * I
+```
+
+#### 5.3.4 你把“投影椭圆对不对”这个问题，误判成“训练为什么不收敛”
+
+这是实现初期非常常见的错位。
+
+其实在这一步，训练都还没上场。你只是在确认：
+
+```text
+几何主链有没有成立
+```
+
+如果这一层没对，继续往训练方向查，只会越查越偏。
+
+---
+
+## 六、第三步：先做一个最小可微训练闭环，不要急着上完整配置
+
+当前向渲染链已经能稳定工作后，才该把系统推进到“会学”。
+
+但这里也有一个很重要的顺序判断：
+
+> 一开始不要同时上真实多视图、复杂 loss、densify、缓存和优化技巧。
+
+先让系统证明一件最朴素的事：
+
+```text
+如果我固定一小批高斯
+图像误差确实会把它们往更好的方向推
+```
+
+### 6.1 最小训练闭环到底长什么样
+
+你真正需要的骨架只有：
 
 ```python
-# 你会遇到的真实 bug:
-z = mu_cam[:, 2]           # 某些高斯在相机后面！z < 0
-J = torch.diag([f/z, f/z]) # z → 0 时 J 爆炸
-Sigma_2d = J @ Sigma_cam @ J.T  # 非正定，求逆失败
+rendered = render(gaussians, camera)
+loss = l1_loss(rendered, gt_image)
+
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
 ```
 
-**理论**:公式没错  
-**现实**:浮点数精度 + 边界情况=灾难
+这一版甚至不急着上 `SSIM`。
 
-**你被迫发明"数值稳定三原则"**:
+因为此时最关键的不是“达到最佳画质”，而是回答：
 
-1. **Clamp 分母**: `z = z.clamp(min=1e-6)` —— 防止除零
-2. **加正则项**: `Sigma_2d += I * 1e-8` —— 保证正定性
-3. **裁剪特征值**: `torch.linalg.eigvalsh(Sigma_2d).clamp(min=1e-8)` —— 求逆前检查
+- 梯度有没有真的流回 `mu`、`Sigma`、`alpha`、颜色参数
+- 图像有没有朝着 GT 方向改进
+- 你的 render 路径和 backward 路径是不是一致的
 
-这不是数学，是**工程经验**。只有踩过坑才知道。
+### 6.2 为什么这一步更适合先用简单 loss
+
+第 5 章已经说过，更完整的图像项常常会写成：
+
+```text
+L_img = (1 - lambda_dssim) * L1 + lambda_dssim * (1 - SSIM)
+```
+
+但在实现早期，先只用 `L1` 的好处很大：
+
+- 更容易判断数值有没有往正确方向动
+- 更容易解释 loss 变化
+- 出问题时排查面更小
+
+不是说 `SSIM` 不重要，而是：
+
+> 先让系统会走，再让它走得更漂亮。
+
+### 6.3 这一层通过时，你应该看到什么
+
+如果这一步成立，通常会看到：
+
+- loss 稳定下降
+- 渲染图从乱到有轮廓
+- `mu.grad`、`Sigma.grad`、`alpha.grad` 不是长期为 0
+- 不同参数组对图像的影响方向符合直觉
+
+例如：
+
+- 调 `mu` 会移动局部结构位置
+- 调 `Sigma` 会改变模糊宽度与方向
+- 调 `alpha` 会改变遮挡和透射
+- 调颜色会直接改变外观
+
+也就是说，这一层真正要确认的是：
+
+```text
+公式已经不只是能前向算图
+而是能被 loss 驱动着改图
+```
 
 ---
 
-### 矛盾三:"PyTorch 慢"vs"CUDA 难学"
+## 七、第四步：再把真实数据、SfM 初始化和多视图训练接上来
 
-**问题**:
-- PyTorch 版渲染：150ms/帧（但可读、可调试）
-- CUDA kernel: 3ms/帧（但需要 GPU 编程经验，一个 typo 跑半天）
+到了这里，才值得把第 6 章和第 7 章那条真正的训练闭环接起来。
 
-**你看到的选择**:
+这一步的任务不是重新发明数学，而是把前面的“toy 可学系统”推进成“真实静态场景训练系统”。
 
-| 策略 | 优点 | 缺点 |
-|------|------|------|
-| 一开始就写 CUDA | 快，"专业" | bug 难调，放弃率高 |
-| 先用 PyTorch,后转 CUDA | 易上手，理解深 | 前期慢（但可接受） |
-| 永远不调用 CUDA | 简单 | 性能差，学不到底层优化 |
+### 7.1 这一层新增的不是渲染本身，而是冷启动能力
 
-**你的方案**:渐进式:
-```
-Week 1-2: 纯 PyTorch (接受 150ms/帧)
-Week 3: torch.compile() 试试（零成本加速）
-后续：读官方 CUDA kernel,选择性重写瓶颈部分
+你在第 6 章已经知道，随机撒高斯通常不靠谱。
+
+所以真实系统常见的起点会是：
+
+```text
+mu_i = x_i^sfm
+color_i = rgb_i / 255
+scale_i 来自重投影误差、近邻距离或混合启发式
+alpha_i 取中等透明度起点
 ```
 
-**记住**:速度是后天可以优化的，但正确性是基础。先把慢速版跑通，再谈优化。
+如果内部参数化更贴近实现，还会是：
+
+```text
+scale_i = log([s_i, s_i, s_i])
+rotation_i = identity
+opacity_logit_i = log(alpha0 / (1 - alpha0))
+sh_i[0] = rgb_i / 255
+sh_i[1:] = 0
+```
+
+### 7.2 这一层最该先验的不是最终 PSNR，而是“进入可训练区间了没有”
+
+你应该先看下面这些东西：
+
+- 初始 render 不是全黑
+- 初始 render 不是全白
+- 投影中心大致覆盖物体区域
+- scale 直方图没有极端大尾巴
+- `alpha` 分布没有整体贴近 0 或 1
+
+如果这些没站住，后面 PSNR 再差，也不一定是训练策略问题。
+
+更可能是：
+
+```text
+初始化根本没把系统送进可训练区间
+```
+
+### 7.3 真正接上多视图训练后，你最该盯哪几条曲线
+
+第 7 章已经给过答案，这里把它们重新放回实现视角：
+
+- `L1 / L_img / PSNR`：看系统有没有整体变好
+- `N`：看结构是否在膨胀、收敛还是失控
+- `alpha` 分布：看系统是不是在堆一堆死高斯
+- `scale` 分布：看结构是在细化还是在跑飞
+
+这一层真正的标志不是“论文指标已经追平”，而是：
+
+> 你终于拿到了一条能稳定训练真实场景的静态 3DGS 主链。
 
 ---
 
-## 验证：如何知道自己"真的懂了"?
+## 八、第五步：为什么 densify / split / prune 一定要晚于最小训练闭环
 
-### 不是"PSNR>30",而是能回答这些问题:
+这一点非常值得单独强调。
 
-1. **如果我把所有高斯的 scale_factor×2, 训练会怎么变？**
-   - 答案：一开始渲染全黑（高斯太大覆盖整个画面），需要调整 alpha 或降低 scale
+很多人实现时最着急的就是 densify，因为它看起来最像 3DGS 的“灵魂”。
 
-2. **为什么 densify_interval=1000，不能是 10?**
-   - 答案：densify 要基于梯度累积判断。每步都 densify → N 爆炸式增长，内存溢出；间隔太长→早期收敛慢
+但从工程顺序上看，它恰好不该最早上。
 
-3. **Tile-based 渲染在什么情况下会失效？**
-   - 答案：相机快速移动时，tile mapping 缓存需要重建；极端情况（高斯包围盒>tile 尺寸）预筛选收益变小
+### 8.1 为什么不能一开始就上 densify
 
-4. **为什么用 MS-SSIM 而不是简单 MSE?**
-   - 答案：MSE 对高频细节不敏感（模糊图也能 low loss），SSIM 模拟人眼感知，逼模型学锐利边缘
+因为 densify 不是独立模块。
 
-**如果你能回答这些问题——你不是在调库，你在理解系统。**
+它依赖前面已经成立的很多东西：
+
+- render 是对的
+- loss 是能降的
+- 梯度方向大致可信
+- footprint / radii 统计是可信的
+- optimizer 状态管理是稳定的
+
+如果这些前提还没站住，你一旦加上 densify，就会看到：
+
+- `N` 疯狂增长
+- 新增高斯位置乱飞
+- 显存暴涨
+- loss 反而更不稳
+
+然后你会误以为“densify 策略错了”。
+
+但很多时候，真正错的是：
+
+```text
+前面的主链还没稳
+densify 只是把错误结构更快放大了
+```
+
+### 8.2 更合理的接入顺序是什么
+
+你应该先让下面这件事成立：
+
+```text
+不做 densify 的固定高斯系统
+已经能稳定下降并得到粗糙但正确的结果
+```
+
+然后再接入结构编辑：
+
+- 梯度大 + footprint 不大 -> clone
+- 梯度大 + footprint 很大 -> split
+- 长期几乎没贡献 -> prune
+
+这时 densify 才会真的在做它该做的事：
+
+> 把已经成立的训练闭环，进一步推进成“容量会自适应”的训练闭环。
+
+### 8.3 这一层真正该看的不是单次 loss，而是结构曲线
+
+当 densify / prune 接上后，你最有用的观测图通常是：
+
+- `N vs step`
+- `radii` 分布
+- `alpha` 分位数
+- 新增与删除高斯的数量
+
+更理想的图景通常是：
+
+```text
+前期 N 上升
+中期继续细化
+后期增速变慢并逐渐稳定
+```
+
+如果你看到的是：
+
+```text
+N 从头到尾无脑爆炸
+```
+
+那说明系统不是在“变强”，而是在“失控扩容”。
 
 ---
 
-## 实战路径：3 周从零到可运行
+## 九、第六步：为什么性能优化必须建立在“慢速参考版”之上
 
-### Week 1: "让它动"（目标：看到模糊图像）
+到了这一步，你才真正来到第 8 章的世界。
 
-#### Day 1-2: 数据加载（你第一次接触 COLMAP 的恐惧）
+也就是：
 
-**你要解决的问题**:COLMAP 输出的是二进制文件（`.bin`），怎么解析？
+```text
+系统已经会表示、会渲染、会训练了
+现在开始问：怎样让它更快
+```
+
+### 9.1 为什么一定要保留一个慢速参考版
+
+因为优化最容易引入一种特别危险的幻觉：
+
+```text
+速度上去了
+所以我觉得自己写对了
+```
+
+但推理优化里很多动作都会改变计算组织方式：
+
+- tile mapping
+- 局部排序
+- early stop
+- mixed precision
+- kernel fusion
+- 缓存复用
+
+这些动作未必会显式报错。
+
+它们更常见的失败方式是：
+
+- 图像 subtly 变了
+- 局部闪烁增加了
+- 边缘顺序错一点点
+- 某些视角下才露出问题
+
+所以工程上一个特别重要的原则就是：
+
+> 每做一次加速，都拿慢速参考版做逐项对照。
+
+### 9.2 这一层最值得引入的第一个优化通常是什么
+
+通常不是 mixed precision，也不是 fusion，而是：
+
+```text
+tile-based culling / tile mapping
+```
+
+因为它最直接地利用了 Gaussian 的局部性，而且不需要先改掉整条数学链。
+
+这一层一旦成立，你再继续往下接：
+
+- 排序缓存
+- tile cache
+- mixed precision
+- kernel fusion
+
+就会更稳，也更容易测出每一步到底省了什么。
+
+### 9.3 这一层真正的验收标准是什么
+
+不是单看帧率。
+
+而是同时满足两件事：
+
+```text
+输出几乎不变
+帧时间显著下降
+```
+
+也就是说，你应该同时记录：
+
+- `frame time`
+- `max abs diff`
+- `PSNR(render_fast, render_ref)`
+- 如果有连续视角，还要看闪烁和稳定性
+
+第 8 章已经告诉你优化在打哪些瓶颈。
+
+第 9 章则是在说：
+
+> 这些优化应该什么时候接进来，以及每接一次，拿什么当验收依据。
+
+---
+
+## 十、一个特别实用的实现习惯：每一层都配一张“检查图”
+
+如果只靠 print 和 loss，你会很慢。
+
+真正高收益的调试方式，往往是一层配一张图。
+
+### 10.1 表示层：看参数统计，不先看最终图
+
+- `scale` 直方图
+- `alpha` 直方图
+- 高斯中心的 3D scatter
+
+### 10.2 投影层：看投影中心和椭圆覆盖
+
+- `mu_2d` 散点图
+- 若干 `Sigma_2d` 椭圆 overlay
+- 哪些点在图像外
+
+### 10.3 渲染层：看 pred / gt / abs diff
+
+- 预测图
+- 真值图
+- 绝对误差图
+
+### 10.4 结构层：看 `N` 曲线和贡献分布
+
+- `N vs step`
+- radii 统计
+- prune 比例
+
+### 10.5 性能层：看 workload，而不是只看平均 FPS
+
+- 每 tile 高斯数目热图
+- frame time breakdown
+- cache hit ratio
+
+这些图的共同作用是：
+
+```text
+把“我觉得哪里不对”
+变成“我知道问题先出在哪一层”
+```
+
+这就是一个系统工程实现者和一个只会调参的人，最核心的区别之一。
+
+---
+
+## 十一、一个最小可运行实验：把 projected ellipses 和 tile workload 画出来
+
+下面这段代码不跑完整 3DGS，它只做一件对实现非常有价值的事：
+
+> 给定几枚已经投影到屏幕上的 2D Gaussian，画出它们的椭圆 footprint、近似 tile 包围盒，以及每个 tile 的负载热图。
+
+这段实验特别适合在你刚接入 tile mapping 时使用，因为它能帮你判断：
+
+- footprint 大小是不是离谱
+- tile 分配是不是和直觉一致
+- 哪些 tile 会成为热点
 
 ```python
-# colmap_loader.py (你的第一个函数)
-def read_cameras_bin(path):
-    """解析 cameras.bin → {camera_id: {id, model, width, height, params}}"""
-    with open(path, 'rb') as f:
-        # COLMAP 二进制格式：num_cameras(int64), 然后循环读取...
-        num_cameras = np.fromfile(f, dtype=np.int64, count=1)[0]
-        cameras = {}
-        for _ in range(num_cameras):
-            camera_id = np.fromfile(f, dtype=np.int64, count=1)[0]
-            # ... 解析 model type, width, height, params
-    return cameras
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse, Rectangle
 
-def read_images_bin(path, cameras):
-    """解析 images.bin → {image_id: {name, R(3x3), T(3,), camera_id}}"""
-    # 类似逻辑...
+
+W, H = 320, 224
+tile = 32
+n_tiles_x = W // tile
+n_tiles_y = H // tile
+
+gaussians = [
+    {
+        'mu': np.array([72.0, 78.0]),
+        'Sigma': np.array([[320.0, 90.0], [90.0, 180.0]]),
+    },
+    {
+        'mu': np.array([168.0, 112.0]),
+        'Sigma': np.array([[520.0, -140.0], [-140.0, 260.0]]),
+    },
+    {
+        'mu': np.array([248.0, 138.0]),
+        'Sigma': np.array([[210.0, 30.0], [30.0, 120.0]]),
+    },
+]
+
+tile_load = np.zeros((n_tiles_y, n_tiles_x), dtype=np.int32)
+hit_boxes = []
+
+
+def ellipse_axes(Sigma, nsig=2.0):
+    vals, vecs = np.linalg.eigh(Sigma)
+    order = np.argsort(vals)[::-1]
+    vals = vals[order]
+    vecs = vecs[:, order]
+
+    width = 2 * nsig * np.sqrt(vals[0])
+    height = 2 * nsig * np.sqrt(vals[1])
+    angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
+    return width, height, angle
+
+
+for g in gaussians:
+    mu = g['mu']
+    Sigma = g['Sigma']
+
+    # 用 3-sigma 的轴对齐包围盒近似 tile 覆盖范围
+    std_x = np.sqrt(Sigma[0, 0])
+    std_y = np.sqrt(Sigma[1, 1])
+    bbox_min = mu - 3.0 * np.array([std_x, std_y])
+    bbox_max = mu + 3.0 * np.array([std_x, std_y])
+
+    tx0 = int(np.clip(np.floor(bbox_min[0] / tile), 0, n_tiles_x - 1))
+    ty0 = int(np.clip(np.floor(bbox_min[1] / tile), 0, n_tiles_y - 1))
+    tx1 = int(np.clip(np.floor(bbox_max[0] / tile), 0, n_tiles_x - 1))
+    ty1 = int(np.clip(np.floor(bbox_max[1] / tile), 0, n_tiles_y - 1))
+
+    hit_boxes.append((mu, Sigma, tx0, ty0, tx1, ty1))
+    tile_load[ty0:ty1 + 1, tx0:tx1 + 1] += 1
+
+
+fig, axes = plt.subplots(1, 3, figsize=(13, 4.2))
+
+axes[0].set_title('projected ellipses and tile boxes')
+for x in range(0, W + 1, tile):
+    axes[0].axvline(x, color='lightgray', linewidth=0.8)
+for y in range(0, H + 1, tile):
+    axes[0].axhline(y, color='lightgray', linewidth=0.8)
+
+for mu, Sigma, tx0, ty0, tx1, ty1 in hit_boxes:
+    width, height, angle = ellipse_axes(Sigma, nsig=2.0)
+    axes[0].add_patch(
+        Ellipse(mu, width, height, angle=angle, fill=False,
+                edgecolor='tab:blue', linewidth=2)
+    )
+    axes[0].add_patch(
+        Rectangle((tx0 * tile, ty0 * tile),
+                  (tx1 - tx0 + 1) * tile,
+                  (ty1 - ty0 + 1) * tile,
+                  fill=False, edgecolor='tab:red', linewidth=1.5)
+    )
+    axes[0].scatter(mu[0], mu[1], c='black', s=18)
+
+axes[0].set_xlim(0, W)
+axes[0].set_ylim(H, 0)
+axes[0].set_aspect('equal')
+axes[0].set_xlabel('u')
+axes[0].set_ylabel('v')
+
+im = axes[1].imshow(tile_load, cmap='magma')
+axes[1].set_title('gaussians per tile')
+axes[1].set_xlabel('tile x')
+axes[1].set_ylabel('tile y')
+plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
+
+nonzero = tile_load[tile_load > 0]
+axes[2].hist(nonzero, bins=np.arange(1, nonzero.max() + 2) - 0.5, rwidth=0.8)
+axes[2].set_title('tile load histogram')
+axes[2].set_xlabel('# gaussians touching a tile')
+axes[2].set_ylabel('count')
+
+plt.tight_layout()
+plt.show()
 ```
 
-**你会卡住的地方**:COLMAP 文档没说清楚二进制格式的细节。你需要：
-- Google "COLMAP binary format specification"
-- 看官方代码 `colmap/extraction/database.cc`（C++源码）
-- 或者直接借用别人的实现（如 nerf-pytorch 的 colmap_loader）
+你应该观察到：
 
-**验证**:
-```python
-cameras = read_cameras_bin('data/chair/sparse/0/cameras.bin')
-images = read_images_bin('data/chair/sparse/0/images.bin', cameras)
-print(f"Loaded {len(images)} images, {len(cameras)} cameras")
-# 输出：Loaded 100 images, 1 cameras ✅
-```
+- 蓝色椭圆表示真正的 Gaussian footprint 几何
+- 红色矩形表示你为了加速而给它分配的 tile 覆盖区域
+- 右边热图能直接看出哪些 tile 会成为局部热点
+- 直方图能告诉你：tile 负载是比较均匀，还是已经有明显重尾
 
----
+这段实验的价值不在于“得到最终图像”，而在于帮你建立一个非常重要的实现习惯：
 
-#### Day 3-4: 慢速渲染（你第一次写投影公式的挣扎）
-
-**你要解决的问题**:数学公式`mu_2d = K @ (R @ mu + T)`怎么变成代码？还要处理协方差变换。
-
-```python
-def project_gaussian(mu, Sigma, R, T, K):
-    """
-    mu: (N, 3) 世界坐标
-    Sigma: (N, 3, 3) 协方差（对称正定）
-    R, T: 相机外参（世界→相机）
-    K: 内参矩阵
-    
-    返回：mu_2d(N,2), Sigma_2d(N,2,2), depth(N,)
-    """
-    # Step 1: 变换到相机坐标系
-    mu_cam = torch.matmul(R, mu.unsqueeze(-1)).squeeze(-1) + T  # (N, 3)
-    
-    # Step 2: 投影（关键！数值稳定）
-    z = mu_cam[:, 2].clamp(min=1e-6)  # ← clamp，防止除零
-    fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-    mu_2d = torch.stack([
-        fx * mu_cam[:, 0] / z + cx,
-        fy * mu_cam[:, 1] / z + cy
-    ], dim=-1)
-    
-    # Step 3: 协方差投影（ Jacobian 变换）
-    # J = [f/z, 0; 0, f/z] 的简化版
-    J = torch.zeros((N, 2, 3), device=mu.device)
-    J[:, 0, 0] = fx / z
-    J[:, 0, 2] = -fx * mu_cam[:, 0] / (z ** 2)
-    J[:, 1, 1] = fy / z
-    J[:, 1, 2] = -fy * mu_cam[:, 1] / (z ** 2)
-    
-    Sigma_cam = torch.matmul(R, Sigma.unsqueeze(0)).squeeze(0) @ R.transpose(-1, -2)
-    Sigma_2d = torch.matmul(J, Sigma_cam) @ J.transpose(-1, -2) + torch.eye(2, device=mu.device) * 1e-8
-    
-    return mu_2d, Sigma_2d, z
-```
-
-**你会遇到的 bug**:
-- `RuntimeError: mat1 and mat2 shapes cannot be multiplied` → 检查 unsqueeze/squeeze
-- 渲染全黑 → `z.clamp()`没加，某些高斯在相机后面
-- 图像偏移 → K 矩阵的 cx, cy 顺序反了
-
-**调试技巧**:打印中间值!
-```python
-print(f"mu_cam range: [{mu_cam.min():.2f}, {mu_cam.max():.2f}]")
-print(f"z range: [{z.min():.4f}, {z.max():.2f}]")  # z 应该>0
-print(f"mu_2d range: x[{mu_2d[:,0].min():.1f}-{mu_2d[:,0].max():.1f}], y[...]"
-      # mu_2d 应该在 [0, W]×[0, H] 范围内
-```
-
----
-
-#### Day 5-6: 训练循环（你第一次看到 loss 下降的快感）
-
-**最小可行训练循环**:
-```python
-# train.py (Week 1 版本)
-gaussians = GaussianModel(init_points)  # 从 COLMAP 点云初始化
-optimizer = torch.optim.Adam([
-    {'params': gaussians.mu, 'lr': 1.6e-4},
-    {'params': gaussians.Sigma, 'lr': 1e-3},
-    {'params': gaussians.alpha, 'lr': 5e-2},
-    {'params': gaussians.color, 'lr': 5e-3}
-], betas=(0.9, 0.99))
-
-for step in range(1000):
-    # 1. 采样一帧
-    idx = step % len(dataset)
-    gt_image, camera = dataset[idx]
-    
-    # 2. 渲染（慢速版，不求快）
-    rendered = render_slow(gaussians, camera, H=gt_image.shape[1], W=gt_image.shape[2])
-    
-    # 3. 计算损失（只用 L1，先不加 SSIM）
-    loss = torch.nn.functional.l1_loss(rendered, gt_image)
-    
-    # 4. 反向传播
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    
-    if step % 100 == 0:
-        print(f"Step {step}: loss={loss.item():.4f}")
-        save_image(rendered, f"output/step_{step}.png")
-```
-
-**如果 loss 不下降**:
-- 检查梯度：`print(gaussians.mu.grad.norm())` → 如果是 0，渲染图有问题
-- 检查学习率：太大→NaN，太小→不动（尝试×10或÷10）
-- 检查初始化：scale_factor 可能不对（调大 10 倍试试）
-
-**你会看到**:loss 从~1.0(随机噪声) 降到~0.3(模糊轮廓)。虽然不清晰，但**它在学**!
-
----
-
-#### Day 7: Week 1 验收
-
-**通过标准**:
-- ✅ 训练 1000 步后 PSNR > 15（从 0 开始）
-- ✅ 渲染图有大致结构（不是噪声或全黑）
-- ✅ 你能解释每一行代码的作用
-
-**没通过？不要急**。回到 Day 4，调 scale_factor、检查投影公式。这周的目标是"看到东西",不是完美质量。
-
----
-
-### Week 2: "让它快 + 让它好"（目标：PSNR>25, <100ms）
-
-#### Day 1-2: Tile-based 渲染（第一次性能优化）
-
-**你面临的问题**:慢速渲染`O(N·H·W)`在 N=50k,H=800,W=600 时要 5 秒/帧。训练 30k 步需要...好几天？
-
-**你需要发明 Tile-based 加速**:
-
-```python
-def assign_gaussians_to_tiles(mu_2d, Sigma_2d, tile_size, W, H):
-    """计算每个高斯的包围盒→分配到高斯可见的 tiles"""
-    # 1. 计算 3σ包围盒（覆盖 99.7% 概率）
-    std = torch.sqrt(torch.diag(Sigma_2d))  # (N, 2)
-    bbox_min = mu_2d - 3 * std
-    bbox_max = mu_2d + 3 * std
-    
-    # 2. 映射到 tile 索引
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    
-    tile_min_x = (bbox_min[:, 0] / tile_size).floor().long().clamp(0, n_tiles_x-1)
-    tile_min_y = (bbox_min[:, 1] / tile_size).floor().long().clamp(0, n_tiles_y-1)
-    tile_max_x = (bbox_max[:, 0] / tile_size).ceil().long().clamp(0, n_tiles_x-1)
-    tile_max_y = (bbox_max[:, 1] / tile_size).ceil().long().clamp(0, n_tiles_y-1)
-    
-    # 3. 构建倒排索引：{tile_id: [gaussian_ids]}
-    tile_mapping = defaultdict(list)
-    for i in range(len(mu_2d)):
-        for tx in range(tile_min_x[i], tile_max_x[i]+1):
-            for ty in range(tile_min_y[i], tile_max_y[i]+1):
-                tile_id = ty * n_tiles_x + tx
-                tile_mapping[tile_id].append(i)
-    
-    return tile_mapping
-```
-
-**关键洞察**:每个像素只渲染"能看见它的高斯",而不是全部 N 个。平均每个 tile 只有几十到几百个高斯（不是几十万）。
-
-**验证加速比**:
-```python
-import time
-
-# 慢速版
-start = time.time()
-img1 = render_slow(gaussians, camera, H, W)
-print(f"Slow: {time.time()-start:.3f}s")  # ~5s
-
-# Tile 版
-start = time.time()
-img2 = render_tiled(gaussians, camera, H, W)
-print(f"Tiled: {time.time()-start:.3f}s")  # ~100ms
-
-# 检查正确性
-assert torch.allclose(img1, img2, atol=1e-3)  # 应该几乎相同
-```
-
-**预期**:50×加速（5s → 100ms）。
-
----
-
-#### Day 3-4: 密度控制（第一次"动态调整模型结构"）
-
-**你面临的问题**:固定 N 的训练，PSNR 卡在 20 上不去。某些区域模糊，某些区域噪声多——因为高斯分布不合理。
-
-**你需要发明 densify/prune 策略**:
-
-```python
-def densify_and_prune(gaussians, radii, grads_mu, grads_Sigma, optimizer):
-    """
-    radii: (N,) 每个高斯影响半径（像素单位）
-    grads_mu: (N,) |∇μ| 梯度幅度（学习活跃度）
-    grads_Sigma: (N,) |∇Σ| 协方差梯度
-    
-    策略：
-    - densify: radii > thresh AND grad > thresh → 克隆或分裂
-    - prune: alpha < 0.005 OR scale < threshold → 删除
-    """
-    # Densify mask（两个条件都要满足）
-    to_densify = (radii > 3.0) & (grads_mu > 0.0002)
-    
-    # Prune mask（任一条件满足就删）
-    scales = gaussians.get_scales()
-    max_scale = scales.max(dim=1)[0]
-    to_prune = (gaussians.alpha < 0.005) | (max_scale < 0.01)
-    
-    # 执行分裂/克隆（简化版）
-    densify_indices = torch.where(to_densify)[0]
-    new_gaussians = []
-    for idx in densify_indices:
-        if torch.rand(1) > 0.5:
-            # 克隆：直接复制，稍偏移位置
-            new_gaussian = clone(gaussians, idx)
-        else:
-            # 分裂：沿最大梯度方向分成两个小的高斯
-            g1, g2 = split(gaussians, idx)
-            new_gaussians.extend([g1, g2])
-    
-    # 删除不需要的
-    to_keep = ~(to_densify | to_prune)
-    gaussians.mu = gaussians.mu[to_keep]
-    gaussians.Sigma = gaussians.Sigma[to_keep]
-    # ... 其他参数同理
-    
-    # 添加新的
-    if new_gaussians:
-        gaussians.append(new_gaussians)
-    
-    # 重建 optimizer（因为 N 变了）
-    rebuild_optimizer(optimizer, gaussians)
-```
-
-**关键**:densify 要基于**梯度累积**,不是每步都判断。通常每 1000 步缓存一次梯度，在第 1000/2000/3000...步时执行 densify。
-
-**你会看到**:N 从初始的~10k 逐渐增长到 50k-200k（取决于场景复杂度）。PSNR 突破 25→30+。
-
----
-
-#### Day 5: 完整训练（第一次跑通 30k 步）
-
-**集成所有组件**:
-```python
-# train.py (Week 2 完整版)
-for step in range(30000):
-    # 渲染 + loss
-    rendered = render_tiled(gaussians, camera)
-    loss = l1_loss(rendered, gt) * 0.8 + (1 - ssim(rendered, gt)) * 0.2
-    
-    # 反向传播
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    
-    # 每 1000 步缓存梯度（用于 densify）
-    if step % 1000 == 0 and step > 500:
-        grads_mu = gaussians.mu.grad.norm(dim=1).detach()
-        compute_radii(...)  # 从投影计算影响半径
-        
-        densify_and_prune(gaussians, radii, grads_mu, optimizer)
-    
-    # 学习率衰减（7500/15000步时×0.1）
-    if step in [7500, 15000]:
-        for param_group in optimizer.param_groups:
-            param_group['lr'] *= 0.1
-    
-    # 日志 + 可视化
-    if step % 100 == 0:
-        print(f"Step {step}: loss={loss.item():.4f}, N={len(gaussians.mu)}")
-```
-
-**预期结果**(chair数据集):
-- 0→500 步：PSNR 从~10→20（初始快速收敛）
-- 500→7500 步：PSNR 20→28（densify 工作，N 增长）
-- 7500→15000 步：PSNR 28→30（LR 衰减，精细调优）
-- 15000→30000 步：PSNR 30→32（收敛到极限）
-
----
-
-#### Day 6-7: 调试与评估
-
-**如果 PSNR < 25**:
-```
-诊断流程:
-1. N 增长了吗？→ 没增长：grad_threshold 太高，densify 不触发
-2. loss 下降了吗？→ 不降：检查 LR、渲染正确性
-3. 渲染图有伪影吗？→ 有条纹：Sigma_2d 加正则项；有空洞：scale_factor 调大
-```
-
-**可视化驱动调试**:保存中间结果!
-```python
-if step % 100 == 0:
-    # 1. 渲染图（肉眼判断质量）
-    save_image(rendered, f"output/step_{step}.png")
-    
-    # 2. 高斯分布（看是否集中在结构上）
-    plt.scatter(mu_2d[:,0].cpu(), mu_2d[:,1].cpu(), s=1)
-    plt.savefig(f"output/centers_{step}.png")
-    
-    # 3. 尺度分布（densify 应该让分布变分散）
-    scales = gaussians.get_scales().max(dim=1)[0]
-    plt.hist(scales.cpu().numpy(), bins=50)
-    plt.savefig(f"output/scales_{step}.png")
+```text
+把一个复杂模块拆成中间检查图来验
+而不是把所有正确性都押在最终 render 上
 ```
 
 ---
 
-### Week 3: "让它飞"（可选，性能优化）
+## 十二、如果你要自己开仓库，最小骨架应该长什么样
 
-这一周是**锦上添花**。如果你前两周跑通了，可以：
-- float16 量化（推理速度↑2×）
-- 缓存排序结果（相机移动小时复用）
-- torch.compile() 或 CUDA kernel
+如果把前面这些里程碑压成一个最小项目结构，它可以非常朴素：
 
-但如果前两周没搞定——**不要急**。先把基础版跑通，性能优化是后天的事。
+```text
+data/
+    colmap_loader.py
+    dataset.py
 
----
+scene/
+    gaussians.py
+    init_from_sfm.py
 
-## 关键调试技巧（你一定会用到的）
+render/
+    project.py
+    blend.py
+    tile.py
 
-### 症状速查表
+train/
+    losses.py
+    density_control.py
+    trainer.py
 
-```
-+------------------+----------+----------------------+------------------------+
-| 症状             | 优先级   | 可能原因             | 快速检查               |
-+------------------+----------+----------------------+------------------------+
-| 渲染全黑         | 🔴高     | Σ太小 / z 为负       | print(scales.mean())   |
-|                  |          |                      | print(z.min())         |
-+------------------+----------+----------------------+------------------------+
-| 渲染全白/模糊    | 🔴高     | α太大 / Σ太大        | print(alpha.mean())    |
-+------------------+----------+----------------------+------------------------+
-| loss = NaN       | 🔴高     | Σ奇异（求逆失败）    | print(torch.det(Sigma))|
-+------------------+----------+----------------------+------------------------+
-| 梯度为 0          | 🟡中     | 高斯"死"了           | print(mu.grad.norm())  |
-+------------------+----------+----------------------+------------------------+
-| PSNR 卡在 20      | 🟡中     | densify 不工作       | print(N over time)     |
-+------------------+----------+----------------------+------------------------+
-| 速度没提升       | 🟢低     | 用了慢速版           | 确认调用 render_tiled  |
-+------------------+----------+----------------------+------------------------+
+tools/
+    diagnostics.py
+    profile.py
 ```
 
----
+这里最重要的不是目录名本身，而是职责切分：
 
-## 最终验收：你懂了吗？
+- `gaussians.py`：只负责表示，不负责训练策略
+- `project.py`：只负责把 3D 送到 2D
+- `blend.py`：只负责 screen-space 混合
+- `losses.py`：只负责监督定义
+- `density_control.py`：只负责结构编辑
+- `profile.py`：只负责性能度量
 
-### Week 1 通过标准
-- [ ] 数据加载能跑通（`dataset[0]` 返回正确的 shape）
-- [ ] 慢速渲染能出图（不是全黑/全白，有大致轮廓）
-- [ ] 训练 1000 步后 PSNR > 15
+这能帮你避免一个特别常见的问题：
 
-### Week 2 通过标准
-- [ ] Tile 渲染比慢速版快>30×
-- [ ] N 能从 10k 增长到 50k+（densify工作）
-- [ ] 完整训练 30k 步后 PSNR > 25
-
-### Week 3 通过标准（可选）
-- [ ] float16 推理 <20ms/帧
-- [ ] 在测试集上评估，和官方实现差距<2dB
-
----
-
-## 如果你卡住了...
-
-### "我 Day 4 的渲染图全黑"
-
-**检查清单**:
-```python
-# 1. z 有没有负数？
-print(f"z range: [{z.min():.4f}, {z.max():.2f}]")  # 应该>0
-
-# 2. scale_factor 对不对？
-scales = gaussians.get_scales()
-print(f"scales mean: {scales.mean().item():.4f}")  # 应该在 0.1-1.0 范围
-
-# 3. mu_2d 在图像范围内吗？
-print(f"mu_2d range: x[{mu_2d[:,0].min():.1f}-{mu_2d[:,0].max():.1f}], y[...]"
-      # 应该在 [0, W]×[0, H] 附近
-
-# 4. alpha 是不是太小？
-print(f"alpha mean: {gaussians.alpha.mean().item():.4f}")  # 应该~0.5
+```text
+为了“方便”把所有逻辑揉在一起
+最后任何 bug 都会同时牵扯几层
 ```
 
-**修复**:scale_factor ×10（最常见原因）
+第 9 章真正推荐的，不只是实现顺序，也是这种层次分离的习惯。
 
 ---
 
-### "我训练了 1000 步，loss 完全不降"
+## 十三、把整章压成一个最短心智模型
 
-**检查清单**:
-```python
-# 1. 梯度有值吗？
-print(f"mu.grad.norm() = {gaussians.mu.grad.norm().item():.6f}")  # 应该>0
+如果你只想记一条链，就记这个：
 
-# 2. LR 是不是太小/太大？
-# 尝试：LR ×10（如果不动）或 ÷10（如果 NaN）
+```text
+第 3 到第 8 章给你的是零件说明书：
+Gaussian 是什么
+渲染链是什么
+loss 是什么
+初始化是什么
+训练闭环是什么
+推理瓶颈是什么
 
-# 3. 渲染图有变化吗？
-# 保存 step=0, 100, 500, 1000 的图对比
+    ↓
+
+第 9 章做的事
+不是再发明一个新公式
+而是告诉你这些零件该按什么顺序装
+
+    ↓
+
+正确顺序不是：
+一上来把训练、densify、加速全写完
+
+    ↓
+
+而是：
+先做 2D footprint + blending
+再做 3D projection
+再做最小训练闭环
+再接真实初始化和多视图训练
+再做 densify / prune
+最后再做 tile / cache / mixed precision / fusion
+
+    ↓
+
+每一层都要有自己的检查图和验收标准
+这样 bug 才会被压回具体模块
+而不是在整套系统里一起爆
 ```
 
+这就是第 9 章真正想给你的实现视角。
+
 ---
 
-### "我 densify 了，但 N 不增长"
+## 十四、本章你真正应该能自己重建的几个问题
 
-**检查**:
-```python
-radii = compute_radii(...)
-grads_mu = gaussians.mu.grad.norm(dim=1)
+读完以后，遮住正文，你至少应该能自己回答：
 
-print(f"radii > 3.0: {(radii > 3.0).sum().item()}")
-print(f"grads_mu > 0.0002: {(grads_mu > 0.0002).sum().item()}")
-print(f"both: {((radii > 3.0) & (grads_mu > 0.0002)).sum().item()}")
+1. 为什么 3DGS 的实现顺序不能按“功能越多越好”来排？
+2. 为什么第一步更适合先做 2D Gaussian footprint + blending 沙盒？
+3. 为什么接上 3D 后，第一张最重要的图通常不是最终 render，而是投影中心和椭圆 overlay？
+4. 为什么最小训练闭环更适合先用简单 loss，而不是一上来就全套配置？
+5. 为什么 densify / split / prune 必须晚于一个已经成立的训练主链？
+6. 为什么性能优化一定要有一个慢速参考版做对照？
+7. 为什么“每一层一张检查图”比只盯着最终 PSNR 更能帮你调试？
+8. 如果系统图像全黑、loss 不降、`N` 爆炸、速度也很慢，你应该怎样按层拆问题，而不是一次性怀疑全部模块？
 
-# 如果最后一个数字是 0，说明阈值太高
-# 尝试：grad_threshold = 0.0001（更激进）
+如果这些问题你能自己从头讲回来，这一章就真的进入你的脑子了。
+
+---
+
+## 十五、下一章接什么
+
+现在你已经知道：
+
+- 静态 3DGS 的表示、渲染、训练和推理优化各自是什么
+- 如果自己实现，应该按什么顺序把它们接成系统
+- 为什么实现路径本身就是一种工程设计
+
+下一章 [chapter_10_4d_gaussian.md](chapter_10_4d_gaussian.md) 会自然接到另一个更难的问题：
+
+> 如果静态场景这条链已经成立，但场景本身会随时间变化，那么前面那条 Gaussian -> projection -> blending 的渲染骨架，哪些部分还不变，哪些部分必须变成时间函数？
+
+也就是从：
+
+```text
+“静态 3DGS 该怎样被真正实现出来”
 ```
 
----
+走到：
 
-## 最后一句话
-
-**调库跑通**:30 分钟，黑盒知识  
-**从零实现**:2-3 周，深度理解
-
-你选哪个？
-
-如果你选择后者——欢迎加入这趟旅程。准备好 debug、查文档、踩坑了。**但三周后你会感谢自己：因为你拥有了真正的理解，而不只是会 run 代码的能力。**
-
-现在，打开你的编辑器，写下第一行:
-```python
-def read_cameras_bin(path):
-    """我的第一个 COLMAP 解析函数"""
+```text
+“如果场景开始动起来，这条实现主线要怎样被扩展成 4D”
 ```
-
----
-
-**附录**:推荐学习资源
-- **COLMAP 文档**: https://colmap.github.io/
-- **官方代码参考**: https://github.com/graphdeco-inria/gaussian-splatting（不是让你抄，是卡住时看思路）
-- **PyTorch 3D**: https://pytorch3d.org/（工具库，可选）
-
-记住：遇到问题先 Google，再问。但**理解为什么比得到答案重要**。

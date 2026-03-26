@@ -269,6 +269,45 @@ color_i = rgb_i / 255
 
 > 先把点的外观先验带进来，而不是让颜色也从纯随机开始。
 
+### 5.2 补充：如果实现内部不是直接存 `{mu, Sigma, alpha, color}`
+
+教程里前面常用的是最直观记法：
+
+```text
+gaussian_i = {mu_i, Sigma_i, alpha_i, color_i}
+```
+
+但真实实现里，初始化常常要再多走半步，把 SfM 输出映到内部参数化里。
+
+一个很常见的对应关系可以写成：
+
+| 高层几何语义 | 常见内部存储 | 初始化直觉 |
+|--------------|--------------|------------|
+| `mu_i` | `xyz` | 直接继承 SfM 点坐标 |
+| `color_i` | `sh_i` 或 RGB 参数 | `sh` 的直流项用点颜色初始化，高阶项先设 0 |
+| `Sigma_i` | `scale_i + rotation_i` | `scale_i = log(s_i)`，`rotation_i` 先给单位旋转 |
+| `alpha_i` | `opacity_logit_i` | 由一个中等透明度 `alpha0` 反推 logit |
+
+例如，如果内部用 log-scale 和 opacity logit，一个很常见的初始化会写成：
+
+```text
+scale_i = log([s_i, s_i, s_i])
+rotation_i = identity_quaternion
+opacity_logit_i = log(alpha0 / (1 - alpha0))
+sh_i[0] = rgb_i / 255
+sh_i[1:] = 0
+```
+
+这一步很容易被误以为只是“工程实现细节”，但它其实会直接影响：
+
+- 初始梯度尺度是否稳定
+- `Sigma` 是否天然保持正定
+- `alpha` 会不会一上来就撞到 0 或 1 的边界
+
+所以更准确地说，初始化不是只决定“放哪”，也在决定：
+
+> 这些高斯进入优化器时，是不是处在一个容易被继续训练的参数化坐标里。
+
 ### 5.3 真正难的是尺度和形状
 
 位置和颜色都很好理解。
@@ -419,7 +458,17 @@ s_i  = beta * median_j(s_ij)
 
 - 用重投影误差估计尺度
 - 用近邻点间距估计尺度
-- 或者把两种信号混起来
+- 用 track 长度 / 观测数修正置信度
+- 或者把几种信号混起来
+
+你可以把几种常见启发式先并排记成下面这样：
+
+| 启发式 | 形式 | 优点 | 风险 |
+|--------|------|------|------|
+| 重投影误差 | `s_i ~ median_j(e_ij z_ij / f_j)` | 和多视图一致性直接相关 | 对异常匹配敏感 |
+| 近邻距离 | `s_i ~ beta * nn_dist(x_i)` | 不依赖完整 track | 点云太稀时会过大 |
+| 观测数修正 | `s_i ~ base / sqrt(n_obs)` | 观测多的点更保守 | 单独使用太粗糙 |
+| 混合策略 | `s_i ~ combine(error, nn, n_obs)` | 更灵活 | 超参数更多 |
 
 但这节最核心的，不是死记哪个常数，而是理解下面这句话：
 
@@ -682,7 +731,7 @@ def init_from_sfm(points3d, images, cameras, alpha0=0.5, beta=0.5):
 
 初始化不需要完美，但至少得满足“可工作”。
 
-最有价值的检查通常有三个。
+最有价值的检查通常有四个。
 
 ### 11.1 检查一：看第一张初始渲染
 
@@ -718,9 +767,68 @@ def init_from_sfm(points3d, images, cameras, alpha0=0.5, beta=0.5):
 - 有没有大量极大值，导致一开始就糊死
 - 尺度分布是否大致落在场景合理范围内
 
+### 11.4 检查四：看透明度是否把系统推向两个极端
+
+初始 `alpha` 如果太大，前排高斯会过早吃掉透射率；如果太小，整张图会接近空白。
+
+所以你最好至少看一眼：
+
+- `alpha` 的均值和分位数
+- 初始图像是不是被少数高斯直接挡死
+- 初始图像是不是几乎什么都没画出来
+
 也就是说，初始化的目标不是“已经对”，而是：
 
 > 还没对，但已经进入了可训练区间。
+
+### 11.5 一个最小可运行检查脚本
+
+下面这段代码不依赖完整训练，只演示初始化后最值得先做的两个检查：
+
+- 投影中心是否大致落在图像范围内
+- 初始尺度分布是否离谱
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# 假设这些来自初始化后的结果
+W, H = 800, 600
+mu_2d = np.random.normal(loc=[W * 0.5, H * 0.5], scale=[120, 90], size=(2000, 2))
+scales = np.exp(np.random.normal(loc=-1.2, scale=0.4, size=2000))
+
+inside = (
+    (mu_2d[:, 0] >= 0) & (mu_2d[:, 0] < W) &
+    (mu_2d[:, 1] >= 0) & (mu_2d[:, 1] < H)
+)
+
+print('projection coverage ratio =', inside.mean())
+print('scale min/median/max =', np.min(scales), np.median(scales), np.max(scales))
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+
+axes[0].scatter(mu_2d[:, 0], mu_2d[:, 1], s=3, alpha=0.35)
+axes[0].set_xlim(0, W)
+axes[0].set_ylim(H, 0)
+axes[0].set_title('projected gaussian centers')
+axes[0].set_xlabel('u')
+axes[0].set_ylabel('v')
+
+axes[1].hist(scales, bins=40, color='tab:blue', alpha=0.8)
+axes[1].set_title('initial scale distribution')
+axes[1].set_xlabel('scale')
+axes[1].set_ylabel('count')
+
+plt.tight_layout()
+plt.show()
+```
+
+你应该观察到：
+
+- 如果大部分点都落在图像外，往往是坐标约定或相机链有问题
+- 如果尺度分布特别偏向极小值，初始渲染容易全黑或空洞
+- 如果尺度分布拖着极长大尾巴，初始图像容易被糊成一片
 
 ---
 
