@@ -430,7 +430,7 @@ def densify_and_prune(gaussians, radii, grads_mu, grads_Sigma, optimizer):
 for step in range(30000):
     # 渲染 + loss
     rendered = render_tiled(gaussians, camera)
-    loss = l1_loss(rendered, gt) * 0.2 + (1 - ssim(rendered, gt)) * 0.8
+    loss = l1_loss(rendered, gt) * 0.8 + (1 - ssim(rendered, gt)) * 0.2
     
     # 反向传播
     optimizer.zero_grad()

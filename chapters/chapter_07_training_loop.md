@@ -6,7 +6,7 @@
 
 ## 🎯 Problem：高斯有了，怎么让它们"学会"正确的场景？
 
-想象一下：你刚刚完成了第 6 章的初始化。现在有 **N 个高斯**（可能是 10⁵-10⁶），每个都有位置μ、协方差Σ、不透明度α和颜色 c。**但它们是随机的、粗糙的**——渲染出来的图像可能一团糟。
+想象一下：你刚刚完成了第 6 章的初始化。现在有 **N 个高斯**（可能是 10⁵-10⁶），每个都有位置μ、协方差Σ、不透明度α和颜色 c。**但它们虽然已经不再是随机撒出来的，仍然只是粗糙的第一版**——渲染出来的图像可能一团糟。
 
 现在你要回答几个问题：
 
@@ -240,11 +240,11 @@ config = {
     "lr_decay_factor": 0.1,         # 每次衰减 ×0.1
     
     # 损失权重
-    "lambda_ssim": 0.8,             # SSIM 权重（L_total = (1-λ)L1 + λ·SSIM）
+    "lambda_dssim": 0.2,            # 结构项权重（L_img = (1-λ)L1 + λ·(1-SSIM)）
 }
 
 # ============ 初始化 ============
-gaussians = init_from_sfm(...)  # 第 6 章：从 SFM points 初始化
+gaussians = init_from_sfm(...)  # 第 6 章：从 SfM 脚手架初始化
 
 optimizer = torch.optim.Adam([
     {"params": gaussians.mu, "lr": 1.6e-4},   # 位置 LR 最小（精细调整）
@@ -269,7 +269,7 @@ for step in range(config["total_steps"]):
     # --- 3. 损失计算 ---
     L1 = F.l1_loss(rendered, gt_image)
     L_ssim = 1 - ms_ssim(rendered, gt_image)
-    L_img = (1 - config["lambda_ssim"]) * L1 + config["lambda_ssim"] * L_ssim
+    L_img = (1 - config["lambda_dssim"]) * L1 + config["lambda_dssim"] * L_ssim
     
     # 正则化：惩罚过大的尺度（防止高斯"爆炸"）
     scales = gaussians.get_scales()  # (N, 3)
