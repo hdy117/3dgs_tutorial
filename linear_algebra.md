@@ -71,9 +71,7 @@
 
 比如一个高斯中心可以写成：
 
-```text
-mu = [x, y, z]^T
-```
+$$\boldsymbol{\mu} = [x, y, z]^T$$
 
 一个相机朝向、一个法线方向、一条光线方向，本质上也都是向量。
 
@@ -87,9 +85,7 @@ mu = [x, y, z]^T
 
 比如：
 
-```text
-x_cam = R x_world + t
-```
+$$\mathbf{x}_{\text{cam}} = R \mathbf{x}_{\text{world}} + \mathbf{t}$$
 
 其中 `R` 负责方向变换，`t` 负责平移。
 
@@ -117,9 +113,7 @@ x_cam = R x_world + t
 
 因为：
 
-```text
-Sigma = Q Λ Q^T
-```
+$$\Sigma = Q \Lambda Q^T$$
 
 - `Q` 给出主轴方向
 - `Λ` 给出沿这些方向的尺度
@@ -130,9 +124,7 @@ Sigma = Q Λ Q^T
 
 这会逼你发明：**行列式**。
 
-```text
-det(A)
-```
+$$\det(A)$$
 
 不是一个考试符号，而是在回答：
 
@@ -153,9 +145,7 @@ det(A)
 
 这会逼你发明：**SVD**。
 
-```text
-A = U S V^T
-```
+$$A = U S V^T$$
 
 SVD 的工程含义非常强：
 
@@ -180,8 +170,8 @@ SVD 的工程含义非常强：
 
 ```text
 A o ---------> o B
-      v = B - A
 ```
+$$\mathbf{v} = B - A$$
 
 这里：
 
@@ -213,10 +203,7 @@ A o ---------> o B
 
 公式写成：
 
-```text
-u + v
-c v
-```
+$$\mathbf{u} + \mathbf{v}, \quad c\mathbf{v}$$
 
 比如：
 
@@ -226,9 +213,7 @@ c v
 
 如果用坐标写，就是：
 
-```text
-[3, 0] + [0, 4] = [3, 4]
-```
+$$[3, 0] + [0, 4] = [3, 4]$$
 
 这就是向量最核心的直觉：
 
@@ -245,15 +230,11 @@ c v
 
 向量 `v = [x, y, z]` 的欧氏长度是：
 
-```text
-||v|| = sqrt(x^2 + y^2 + z^2)
-```
+$$\|\mathbf{v}\| = \sqrt{x^2 + y^2 + z^2}$$
 
 在矩阵记号里，也可以写成：
 
-```text
-||v|| = sqrt(v^T v)
-```
+$$\|\mathbf{v}\| = \sqrt{\mathbf{v}^T \mathbf{v}}$$
 
 它回答的是一个很朴素的问题：
 
@@ -268,9 +249,7 @@ c v
 
 一个常见操作是归一化：
 
-```text
-v_hat = v / ||v||
-```
+$$\hat{\mathbf{v}} = \frac{\mathbf{v}}{\|\mathbf{v}\|}$$
 
 这会把向量变成单位长度，只保留方向信息。
 
@@ -278,15 +257,11 @@ v_hat = v / ||v||
 
 点积可以写成两种完全等价的形式：
 
-```text
-a · b = a^T b
-```
+$$\mathbf{a} \cdot \mathbf{b} = \mathbf{a}^T \mathbf{b}$$
 
 和
 
-```text
-a · b = ||a|| ||b|| cos(theta)
-```
+$$\mathbf{a} \cdot \mathbf{b} = \|\mathbf{a}\| \|\mathbf{b}\| \cos\theta$$
 
 这两个式子连起来看，意思就非常清楚了：
 
@@ -294,23 +269,17 @@ a · b = ||a|| ||b|| cos(theta)
 
 你也可以把它理解成：
 
-```text
-b 在 a 方向上的投影有多长
-```
+> **b** 在 **a** 方向上的投影有多长
 
 常见判断：
 
-```text
-a · b > 0   -> 大致同向
-a · b = 0   -> 垂直
-a · b < 0   -> 反向
-```
+- $\mathbf{a} \cdot \mathbf{b} > 0$ → 大致同向
+- $\mathbf{a} \cdot \mathbf{b} = 0$ → 垂直
+- $\mathbf{a} \cdot \mathbf{b} < 0$ → 反向
 
 一个更具体的投影公式是：
 
-```text
-proj_a(b) = (a^T b / a^T a) a
-```
+$$\text{proj}_{\mathbf{a}}(\mathbf{b}) = \frac{\mathbf{a}^T \mathbf{b}}{\mathbf{a}^T \mathbf{a}} \mathbf{a}$$
 
 工程上它几乎无处不在：
 
@@ -327,36 +296,24 @@ proj_a(b) = (a^T b / a^T a) a
 
 叉积只在少数维度里有漂亮形式，但在 `3D` 里特别好用。
 
-```text
-a x b
-```
+$$\mathbf{a} \times \mathbf{b}$$
 
 它返回一个同时垂直于 `a` 和 `b` 的方向。
 
 公式写开是：
 
-```text
-a x b = [
-    a2 b3 - a3 b2,
-    a3 b1 - a1 b3,
-    a1 b2 - a2 b1
-]
-```
+$$\mathbf{a} \times \mathbf{b} = \begin{bmatrix} a_2b_3 - a_3b_2 \\ a_3b_1 - a_1b_3 \\ a_1b_2 - a_2b_1 \end{bmatrix}$$
 
 还有一个极其重要的长度关系：
 
-```text
-||a x b|| = ||a|| ||b|| sin(theta)
-```
+$$\|\mathbf{a} \times \mathbf{b}\| = \|\mathbf{a}\| \|\mathbf{b}\| \sin\theta$$
 
 这说明叉积的模长，其实等于以 `a` 和 `b` 为边的平行四边形面积。
 
 所以你可以把点积和叉积并排记：
 
-```text
-点积问：有多对齐？
-叉积问：垂直方向是谁？面积有多大？
-```
+> **点积问**：有多对齐？
+> **叉积问**：垂直方向是谁？面积有多大？
 
 工程上常见在：
 
@@ -425,16 +382,11 @@ plt.show()
 
 初学时，矩阵看起来像数字表：
 
-```text
-[a b]
-[c d]
-```
+$$\begin{bmatrix} a & b \\ c & d \end{bmatrix}$$
 
 但线性代数真正关心的不是表格外形，而是：
 
-```text
-y = A x
-```
+$$\mathbf{y} = A\mathbf{x}$$
 
 也就是：
 
@@ -452,16 +404,11 @@ y = A x
 
 在二维里，任何向量都可以写成：
 
-```text
-x = x1 e1 + x2 e2
-```
+$$\mathbf{x} = x_1 \mathbf{e}_1 + x_2 \mathbf{e}_2$$
 
 如果 `T` 是线性变换，那么：
 
-```text
-T(x) = T(x1 e1 + x2 e2)
-     = x1 T(e1) + x2 T(e2)
-```
+$$\begin{aligned} T(\mathbf{x}) &= T(x_1 \mathbf{e}_1 + x_2 \mathbf{e}_2) \\ &= x_1 T(\mathbf{e}_1) + x_2 T(\mathbf{e}_2) \end{aligned}$$
 
 这里各个符号的角色要分清：
 
@@ -476,9 +423,7 @@ T(x) = T(x1 e1 + x2 e2)
 
 这就是为什么矩阵的列向量那么关键：
 
-```text
-A = [T(e1)  T(e2)  T(e3)]
-```
+$$A = [T(\mathbf{e}_1) \ T(\mathbf{e}_2) \ T(\mathbf{e}_3)]$$
 
 也就是说：
 
@@ -495,9 +440,7 @@ A = [T(e1)  T(e2)  T(e3)]
 
 关键是先分清：本章默认采用的是**列向量约定**，也就是
 
-```text
-y = A x
-```
+$$\mathbf{y} = A\mathbf{x}$$
 
 在这个约定下，列视角和行视角其实是在看同一个矩阵的两面。
 
@@ -505,9 +448,7 @@ y = A x
 
 这一视角最直接对应刚才那句话：
 
-```text
-A e_j = A 的第 j 列
-```
+$$A\mathbf{e}_j = A \text{ 的第 } j \text{ 列}$$
 
 也就是说：
 
@@ -519,9 +460,7 @@ A e_j = A 的第 j 列
 
 如果把矩阵写成 `A = [a_ij]`，那么在 `y = A x` 里，第 `i` 个输出坐标满足：
 
-```text
-y_i = sum_j a_ij x_j
-```
+$$y_i = \sum_j a_{ij} x_j$$
 
 这句话说明：
 
@@ -531,9 +470,7 @@ y_i = sum_j a_ij x_j
 
 比如在全连接层里：
 
-```text
-y_i = w_i^T x + b_i
-```
+$$y_i = \mathbf{w}_i^T \mathbf{x} + b_i$$
 
 这里的 `w_i^T` 本质上就是权重矩阵的一行。它表达的是：
 
@@ -546,11 +483,9 @@ y_i = w_i^T x + b_i
 
 对同一个 `a_ij` 来说，在 `y = A x` 这个约定下，它表达的是：
 
-```text
-输入的第 j 个分量
-对输出的第 i 个分量
-贡献了多少
-```
+> 输入的第 $j$ 个分量
+> 对输出的第 $i$ 个分量
+> 贡献了多少
 
 所以：
 
@@ -561,25 +496,17 @@ y_i = w_i^T x + b_i
 
 有些领域，尤其是某些统计教材、表格数据处理或工程实现里，会把样本写成行向量，于是公式可能写成：
 
-```text
-y^T = x^T A
-```
+$$\mathbf{y}^T = \mathbf{x}^T A$$
 
 这时很多“行/列谁在表示什么”的叙述会整体转置。
 
 所以真正稳妥的习惯不是死记：
 
-```text
-列一定表示这个，行一定表示那个
-```
+> 列一定表示这个，行一定表示那个
 
 而是先看作者到底写的是：
 
-```text
-y = A x
-还是
-y^T = x^T A
-```
+$$\mathbf{y} = A\mathbf{x} \quad \text{还是} \quad \mathbf{y}^T = \mathbf{x}^T A$$
 
 然后再判断矩阵的行和列各自扮演什么角色。
 
@@ -597,15 +524,11 @@ y^T = x^T A
 
 如果你写的是：
 
-```text
-x' = A x
-```
+$$\mathbf{x}' = A\mathbf{x}$$
 
 那么第 `i` 个节点的新值是：
 
-```text
-x'_i = sum_j a_ij x_j
-```
+$$x'_i = \sum_j a_{ij} x_j$$
 
 在这个写法下，`a_ij` 更像是：
 
@@ -613,9 +536,7 @@ x'_i = sum_j a_ij x_j
 
 但有些图论教材会把：
 
-```text
-A_ij = 1 表示 i -> j 有边
-```
+$$A_{ij} = 1 \text{ 表示 } i \to j \text{ 有边}$$
 
 当成邻接矩阵定义。这样一来，如果你还想做“从邻居聚合到自己”的更新，公式就常常会写成 `x' = A^T x`。
 
@@ -625,9 +546,7 @@ A_ij = 1 表示 i -> j 有边
 
 在无向图里，因为常有：
 
-```text
-A = A^T
-```
+$$A = A^T$$
 
 这种方向上的歧义就会小很多。
 
@@ -670,16 +589,11 @@ y'
 
 一个变换 `T` 是线性的，要求它同时满足：
 
-```text
-1. T(x + y) = T(x) + T(y)
-2. T(c x)   = c T(x)
-```
+$$\begin{aligned} 1. \& T(\mathbf{x} + \mathbf{y}) = T(\mathbf{x}) + T(\mathbf{y}) \\ 2. \& T(c\mathbf{x}) = cT(\mathbf{x}) \end{aligned}$$
 
 合起来就是：
 
-```text
-T(a x + b y) = a T(x) + b T(y)
-```
+$$T(a\mathbf{x} + b\mathbf{y}) = aT(\mathbf{x}) + bT(\mathbf{y})$$
 
 翻译成人话就是：
 
@@ -699,16 +613,11 @@ T(a x + b y) = a T(x) + b T(y)
 
 二维缩放矩阵：
 
-```text
-S = [sx  0 ]
-    [0   sy]
-```
+$$S = \begin{bmatrix} s_x & 0 \\ 0 & s_y \end{bmatrix}$$
 
 它实现的是：
 
-```text
-[x, y] -> [sx x, sy y]
-```
+$$[x, y] \to [s_x x, s_y y]$$
 
 沿不同轴拉长或压短。
 
@@ -716,19 +625,13 @@ S = [sx  0 ]
 
 二维旋转矩阵：
 
-```text
-R(theta) = [cos(theta)  -sin(theta)]
-           [sin(theta)   cos(theta)]
-```
+$$R(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{bmatrix}$$
 
 它改变方向，但保持长度。
 
 #### 剪切
 
-```text
-H = [1  k]
-    [0  1]
-```
+$$H = \begin{bmatrix} 1 & k \\ 0 & 1 \end{bmatrix}$$
 
 它会把矩形推成平行四边形。
 
@@ -736,10 +639,7 @@ H = [1  k]
 
 比如投到 x 轴：
 
-```text
-P = [1  0]
-    [0  0]
-```
+$$P = \begin{bmatrix} 1 & 0 \\ 0 & 0 \end{bmatrix}$$
 
 它会把所有 y 方向信息直接丢掉。
 
@@ -752,9 +652,7 @@ P = [1  0]
 
 为什么后者不是线性？因为它把原点挪走了：
 
-```text
-f(0) = b != 0
-```
+$$f(0) = b \neq 0$$
 
 但工程里我们依然天天用它，因为真实系统里“平移/偏置”太常见：
 
@@ -772,22 +670,15 @@ f(0) = b != 0
 
 办法是：**升一维**。
 
-```text
-[x, y, z] -> [x, y, z, 1]
-```
+$$[x, y, z] \to [x, y, z, 1]$$
 
 这样你就能把：
 
-```text
-x' = R x + t
-```
+$$\mathbf{x}' = R\mathbf{x} + \mathbf{t}$$
 
 写成：
 
-```text
-[x']   [R  t] [x]
-[1 ] = [0  1] [1]
-```
+$$\begin{bmatrix} \mathbf{x}' \ 1 \end{bmatrix} = egin{bmatrix} R & \mathbf{t} \ \mathbf{0}^T & 1 \end{bmatrix} egin{bmatrix} \mathbf{x} \ 1 \end{bmatrix}$$
 
 也就是一个 `4x4` 矩阵乘法。
 
@@ -799,9 +690,7 @@ x' = R x + t
 
 因为只要每一步都能写成矩阵或仿射形式，你就能把很多动作压成一条统一链：
 
-```text
-x_screen = P V M x_local
-```
+$$\mathbf{x}_{\text{screen}} = PVM \mathbf{x}_{\text{local}}$$
 
 这里：
 
@@ -892,15 +781,11 @@ e2 = 朝上
 
 更正式一点说，如果把基向量排成矩阵：
 
-```text
-B = [b1  b2  ...  bn]
-```
+$$B = [\mathbf{b}_1 \ \mathbf{b}_2 \ \cdots \ \mathbf{b}_n]$$
 
 那么任何向量 `x` 都可以写成：
 
-```text
-x = B c
-```
+$$\mathbf{x} = B\mathbf{c}$$
 
 其中 `c` 就是 `x` 在这组基下的坐标。
 
@@ -924,10 +809,7 @@ x = B c
 
 如果一组基矩阵是 `B`，那坐标和几何向量之间的关系是：
 
-```text
-x = B c
-c = B^{-1} x
-```
+$$\mathbf{x} = B\mathbf{c}, \quad \mathbf{c} = B^{-1}\mathbf{x}$$
 
 这两个式子特别值得记住，因为它们就是：
 
@@ -966,9 +848,7 @@ c = B^{-1} x
 
 也正因为如此，你会在很多推导里看到：
 
-```text
-R^{-1} = R^T
-```
+$$R^{-1} = R^T$$
 
 于是“世界转相机”和“相机相对世界旋转”经常只差一个转置。
 
@@ -1068,9 +948,7 @@ plt.show()
 
 如果只有一个随机变量 `X`，我们先看它的**方差**：
 
-```text
-Var(X) = E[(X - E[X])^2]
-```
+$$\text{Var}(X) = \mathbb{E}[(X - \mathbb{E}[X])^2]$$
 
 它衡量的是：
 
@@ -1078,9 +956,7 @@ Var(X) = E[(X - E[X])^2]
 
 如果有两个随机变量 `X` 和 `Y`，就可以定义它们的**协方差**：
 
-```text
-Cov(X, Y) = E[(X - E[X])(Y - E[Y])]
-```
+$$\text{Cov}(X, Y) = \mathbb{E}[(X - \mathbb{E}[X])(Y - \mathbb{E}[Y])]$$
 
 它衡量的是：
 
@@ -1094,16 +970,11 @@ Cov(X, Y) = E[(X - E[X])(Y - E[Y])]
 
 把很多维一起写，就得到**协方差矩阵**。如果随机向量是 `x ∈ R^n`，均值是 `mu = E[x]`，那么：
 
-```text
-Sigma = E[(x - mu)(x - mu)^T]
-```
+$$\Sigma = \mathbb{E}[(\mathbf{x} - \boldsymbol{\mu})(\mathbf{x} - \boldsymbol{\mu})^T]$$
 
 在二维里，它长成：
 
-```text
-Sigma = [Var(X)    Cov(X, Y)]
-        [Cov(Y, X) Var(Y)   ]
-```
+$$\Sigma = \begin{bmatrix} \text{Var}(X) & \text{Cov}(X,Y) \\ \text{Cov}(Y,X) & \text{Var}(Y) \end{bmatrix}$$
 
 这里最值得先记住的是：
 
@@ -1124,9 +995,7 @@ Sigma = [Var(X)    Cov(X, Y)]
 
 ![球到椭球、旋转和平移示意图](images/sphere.png)
 
-```text
-1 = ((x - 1) / 2)^2 + (2y)^2 + z^2
-```
+$$1 = \left(\frac{x-1}{2}\right)^2 + (2y)^2 + z^2$$
 
 它其实正好可以拿来说明：
 
@@ -1136,9 +1005,7 @@ Sigma = [Var(X)    Cov(X, Y)]
 
 先从单位球开始：
 
-```text
-u_1^2 + u_2^2 + u_3^2 = 1
-```
+$$u_1^2 + u_2^2 + u_3^2 = 1$$
 
 这表示一个以原点为中心、三个方向半径都一样的球。
 
@@ -1146,24 +1013,17 @@ u_1^2 + u_2^2 + u_3^2 = 1
 
 如果先沿三个坐标轴做缩放：
 
-```text
-x = S u
-S = diag(2, 1/2, 1)
-```
+$$\mathbf{x} = S\mathbf{u}, \quad S = \text{diag}(2, \frac{1}{2}, 1)$$
 
 那么球就会被拉成一个和坐标轴对齐的椭球。
 
 因为：
 
-```text
-u = S^{-1} x
-```
+$$\mathbf{u} = S^{-1} \mathbf{x}$$
 
 代回单位球方程后得到：
 
-```text
-(x / 2)^2 + (2y)^2 + z^2 = 1
-```
+$$\left(\frac{x}{2}\right)^2 + (2y)^2 + z^2 = 1$$
 
 这一步的几何意义是：
 
@@ -1175,16 +1035,11 @@ u = S^{-1} x
 
 接着再做平移：
 
-```text
-x = S u + mu
-mu = [1, 0, 0]^T
-```
+$$\mathbf{x} = S\mathbf{u} + \boldsymbol{\mu}, \quad \boldsymbol{\mu} = [1, 0, 0]^T$$
 
 也就是整个椭球沿 `x` 方向平移 1 个单位。于是方程就变成：
 
-```text
-((x - 1) / 2)^2 + (2y)^2 + z^2 = 1
-```
+$$\left(\frac{x-1}{2}\right)^2 + (2y)^2 + z^2 = 1$$
 
 这正是图里的椭球。它说明：
 
@@ -1193,9 +1048,7 @@ mu = [1, 0, 0]^T
 
 如果还想让这个椭球在空间里再旋转一次，可以再加一个旋转矩阵 `R`：
 
-```text
-x = R S u + mu
-```
+$$\mathbf{x} = RS\mathbf{u} + \boldsymbol{\mu}$$
 
 这时几何上发生的是：
 
@@ -1207,15 +1060,11 @@ x = R S u + mu
 
 对应到协方差矩阵的写法，就是：
 
-```text
-Sigma = R diag(sx^2, sy^2, sz^2) R^T
-```
+$$\Sigma = R \cdot \text{diag}(s_x^2, s_y^2, s_z^2) \cdot R^T$$
 
 然后高斯或椭球的等值面就可以统一写成：
 
-```text
-(x - mu)^T Sigma^{-1} (x - mu) = 1
-```
+$$(\mathbf{x} - \boldsymbol{\mu})^T \Sigma^{-1} (\mathbf{x} - \boldsymbol{\mu}) = 1$$
 
 这里：
 
@@ -1248,16 +1097,11 @@ Sigma = R diag(sx^2, sy^2, sz^2) R^T
 
 二维或三维高斯常见写法是：
 
-```text
-p(x) = 1 / sqrt((2 pi)^n det(Sigma))
-       * exp(-1/2 (x - mu)^T Sigma^{-1} (x - mu))
-```
+$$p(\mathbf{x}) = \frac{1}{\sqrt{(2\pi)^n \det(\Sigma)}} \exp\left(-\frac{1}{2}(\mathbf{x}-\boldsymbol{\mu})^T\Sigma^{-1}(\mathbf{x}-\boldsymbol{\mu})\right)$$
 
 这里最值得盯住的不是归一化常数，而是指数里的二次型：
 
-```text
-(x - mu)^T Sigma^{-1} (x - mu)
-```
+$$(\mathbf{x} - \boldsymbol{\mu})^T \Sigma^{-1} (\mathbf{x} - \boldsymbol{\mu})$$
 
 它在做的事是：
 
@@ -1274,9 +1118,7 @@ p(x) = 1 / sqrt((2 pi)^n det(Sigma))
 
 如果 `Sigma` 是对称正定矩阵，那么它一定能被分解成：
 
-```text
-Sigma = Q Λ Q^T
-```
+$$\Sigma = Q \Lambda Q^T$$
 
 这里：
 
@@ -1285,17 +1127,13 @@ Sigma = Q Λ Q^T
 
 于是你立刻得到：
 
-```text
-特征向量     -> 椭球主轴方向
-特征值       -> 沿主轴的扩张强度
-sqrt(特征值) -> 半轴长度尺度
-```
+- **特征向量** → 椭球主轴方向
+- **特征值** → 沿主轴的扩张强度
+- $\sqrt{	ext{特征值}}$ → 半轴长度尺度
 
 如果你更想从“旋转 + 尺度”角度理解，也可以写成：
 
-```text
-Sigma = R diag(sx^2, sy^2, sz^2) R^T
-```
+$$\Sigma = R \cdot \text{diag}(s_x^2, s_y^2, s_z^2) \cdot R^T$$
 
 这在 3DGS 里尤其自然。
 
@@ -1319,9 +1157,7 @@ Sigma = R diag(sx^2, sy^2, sz^2) R^T
 
 所以很多实现会特别注意数值稳定性，比如加一点小正则：
 
-```text
-Sigma <- Sigma + eps I
-```
+$$\Sigma \leftarrow \Sigma + \epsilon I$$
 
 ### 6.6 为什么旋转椭球时要写成 `R @ Sigma @ R^T`
 
@@ -1329,21 +1165,15 @@ Sigma <- Sigma + eps I
 
 如果某个向量经过线性变换：
 
-```text
-y = A x
-```
+$$\mathbf{y} = A\mathbf{x}$$
 
 那么它的协方差会按下面这个规则传播：
 
-```text
-Cov(y) = A Cov(x) A^T
-```
+$$\text{Cov}(\mathbf{y}) = A \text{Cov}(\mathbf{x}) A^T$$
 
 所以如果你把一个高斯椭球旋转了，协方差自然就会变成：
 
-```text
-Sigma' = R Sigma R^T
-```
+$$\Sigma' = R \Sigma R^T$$
 
 这在说什么？
 
@@ -1447,9 +1277,7 @@ v*  ->  λ v*
 
 数学上写作：
 
-```text
-A v = λ v
-```
+$$A\mathbf{v} = \lambda \mathbf{v}$$
 
 ### 7.3 为什么这个公式这么值钱
 
@@ -1468,15 +1296,11 @@ A v = λ v
 
 把 `A v = λ v` 改写一下：
 
-```text
-(A - λ I) v = 0
-```
+$$(A - \lambda I)\mathbf{v} = 0$$
 
 如果想让这个方程有非零解 `v != 0`，就必须有：
 
-```text
-det(A - λ I) = 0
-```
+$$\det(A - \lambda I) = 0$$
 
 这就是特征方程。
 
@@ -1488,9 +1312,7 @@ det(A - λ I) = 0
 
 如果一个矩阵有足够多线性无关的特征向量，你就能把它拆成：
 
-```text
-A = P Λ P^{-1}
-```
+$$A = P \Lambda P^{-1}$$
 
 读法不是“背公式”，而是：
 
@@ -1575,12 +1397,7 @@ plt.show()
 
 二维情况下，
 
-```text
-A = [a b]
-    [c d]
-
-det(A) = ad - bc
-```
+$$A = \begin{bmatrix} a & b \\ c & d \end{bmatrix}, \quad \det(A) = ad - bc$$
 
 所以：
 
@@ -1599,19 +1416,13 @@ det(A) = ad - bc
 
 这也是为什么：
 
-```text
-det(A) != 0  <=>  A 可逆
-```
+$$\det(A) \neq 0 \iff A \text{ 可逆}$$
 
 可逆性和“体积没有塌”本质上是同一个现象的两种说法。
 
 ### 8.3 一些非常值得记住的性质
 
-```text
-det(AB) = det(A) det(B)
-det(A^{-1}) = 1 / det(A)
-det(R) = 1 或 -1  （旋转/反射矩阵）
-```
+$$\det(AB) = \det(A)\det(B), \quad \det(A^{-1}) = \frac{1}{\det(A)}, \quad \det(R) = \pm 1 \text{ （旋转/反射矩阵）}$$
 
 其中 `det(R) = 1` 对应真正旋转，`det(R) = -1` 通常意味着带了镜像翻转。
 
@@ -1619,9 +1430,7 @@ det(R) = 1 或 -1  （旋转/反射矩阵）
 
 多元高斯的归一化系数里会出现 `det(Sigma)`：
 
-```text
-1 / sqrt((2 pi)^n det(Sigma))
-```
+$$\frac{1}{\sqrt{(2\pi)^n \det(\Sigma)}}$$
 
 你可以把它理解成：
 
@@ -1656,12 +1465,10 @@ det(R) = 1 或 -1  （旋转/反射矩阵）
 
 三维物体经过不同秩的变换：
 
-```text
-rank = 3   立体还是立体
-rank = 2   立体被压成平面
-rank = 1   立体被压成直线
-rank = 0   全部压到原点
-```
+- $	ext{rank} = 3$：立体还是立体
+- $	ext{rank} = 2$：立体被压成平面
+- $	ext{rank} = 1$：立体被压成直线
+- $	ext{rank} = 0$：全部压到原点
 
 所以秩最直观的意义是：
 
@@ -1678,9 +1485,7 @@ rank = 0   全部压到原点
 
 如果有些非零向量满足：
 
-```text
-A x = 0
-```
+$$A\mathbf{x} = 0$$
 
 那说明这些方向经过变换后完全消失。
 这叫零空间（null space）。
@@ -1693,9 +1498,7 @@ A x = 0
 
 如果 `A` 是一个 `m x n` 矩阵，那么：
 
-```text
-rank(A) + nullity(A) = n
-```
+$$\text{rank}(A) + \text{nullity}(A) = n$$
 
 翻译成人话就是：
 
@@ -1804,9 +1607,7 @@ SVD 说，这整个过程可以拆成：
 
 ### 10.3 公式只是这个动作的压缩写法
 
-```text
-A = U S V^T
-```
+$$A = U S V^T$$
 
 其中：
 
@@ -1830,10 +1631,7 @@ A = U S V^T
 
 SVD 的一个关键来源是：
 
-```text
-A^T A = V S^2 V^T
-A A^T = U S^2 U^T
-```
+$$A^T A = V S^2 V^T, \quad AA^T = US^2U^T$$
 
 也就是说：
 
@@ -1856,9 +1654,7 @@ A A^T = U S^2 U^T
 
 比如伪逆可以写成：
 
-```text
-A^+ = V S^+ U^T
-```
+$$A^+ = VS^+U^T$$
 
 这对最小二乘求解、病态系统分析、降维都特别重要。
 
@@ -1944,16 +1740,11 @@ plt.show()
 
 如果相机坐标中的点是：
 
-```text
-x_cam = [X, Y, Z]^T
-```
+$$\mathbf{x}_{\text{cam}} = [X, Y, Z]^T$$
 
 那图像坐标通常是：
 
-```text
-u = fx X / Z + cx
-v = fy Y / Z + cy
-```
+$$\begin{aligned} u &= \frac{f_x X}{Z} + c_x \\ v &= \frac{f_y Y}{Z} + c_y \end{aligned}$$
 
 这里有除法 `1 / Z`，所以它不是全局线性的。
 
@@ -1966,24 +1757,17 @@ v = fy Y / Z + cy
 
 虽然透视投影全局不是线性的，但在某个高斯中心附近，你可以只看很小的局部扰动：
 
-```text
-delta_p ≈ J delta_x
-```
+$$\delta \mathbf{p} \approx J \delta \mathbf{x}$$
 
 这里 `J` 是投影函数在当前点处的 Jacobian。
 
 对于上面的投影公式，`J` 可以写成一个 `2x3` 矩阵：
 
-```text
-J = [fx/Z     0     -fx X/Z^2]
-    [0      fy/Z    -fy Y/Z^2]
-```
+$$J = \begin{bmatrix} f_x/Z & 0 & -f_x X/Z^2 \\ 0 & f_y/Z & -f_y Y/Z^2 \end{bmatrix}$$
 
 一旦局部近似成线性，协方差就能按线性规则传播：
 
-```text
-Sigma_2d ≈ J Sigma_cam J^T
-```
+$$\Sigma_{\text{2d}} \approx J \Sigma_{\text{cam}} J^T$$
 
 这一步特别重要，因为它说明：
 
@@ -1993,9 +1777,7 @@ Sigma_2d ≈ J Sigma_cam J^T
 
 这里的 `d` 是像素点相对高斯中心的偏移：
 
-```text
-d = p - mu_2d
-```
+$$\mathbf{d} = \mathbf{p} - \boldsymbol{\mu}_{\text{2d}}$$
 
 如果只用普通欧氏距离，你默认每个方向都一视同仁。
 但椭球不是球。它在不同方向上宽窄不同。
@@ -2006,9 +1788,7 @@ d = p - mu_2d
 
 然后高斯权重就可以写成：
 
-```text
-g(d) = exp(-1/2 d^T Sigma_2d^{-1} d)
-```
+$$g(\mathbf{d}) = \exp\left(-\frac{1}{2} \mathbf{d}^T \Sigma_{\text{2d}}^{-1} \mathbf{d}\right)$$
 
 这里的指数衰减就是 `2D` footprint 的核心。
 
@@ -2062,9 +1842,7 @@ print('eigenvalues =', np.linalg.eigvalsh(Sigma_2d))
 
 所以工程里说“线性”，真正指的是：
 
-```text
-T(ax + by) = aT(x) + bT(y)
-```
+$$T(a\mathbf{x} + b\mathbf{y}) = aT(\mathbf{x}) + bT(\mathbf{y})$$
 
 而不是“图像长得像直线”。
 
