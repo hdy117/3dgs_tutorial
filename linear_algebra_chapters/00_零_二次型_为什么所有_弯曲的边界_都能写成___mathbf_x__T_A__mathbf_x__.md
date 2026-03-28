@@ -63,13 +63,9 @@ $$\begin{bmatrix} x & y \end{bmatrix} \begin{bmatrix} 1/a^2 & 0 \\ 0 & 1/b^2 \en
 
 **验证一下**（从左到右逐步计算）：
 
-```text
-第一步：[x y] × [1/a²  0   ] = [$x/a^2$  $y/b^2$]
-       └───[0    1/b²]───┘
+$$\begin{bmatrix} x & y \end{bmatrix} \times \begin{bmatrix} 1/a^2 & 0 \\ 0 & 1/b^2 \end{bmatrix} = \begin{bmatrix} x/a^2 & y/b^2 \end{bmatrix}$$
 
-第二步：[$x/a^2$  $y/b^2$] × [x] = $x^2/a^2 + y^2/b^2$
-                               └──[y]──┘
-```
+$$\begin{bmatrix} x/a^2 & y/b^2 \end{bmatrix} \times \begin{bmatrix} x \\ y \end{bmatrix} = x^2/a^2 + y^2/b^2$$
 
 **成功了！** 现在我们有了：
 $$\mathbf{x}^T A \mathbf{x} = 1, \quad A = \begin{bmatrix} 1/a^2 & 0 \\ 0 & 1/b^2 \end{bmatrix}$$
