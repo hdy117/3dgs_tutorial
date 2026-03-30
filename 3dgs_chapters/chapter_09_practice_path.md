@@ -862,7 +862,294 @@ plt.show()
 
 - 蓝色椭圆表示真正的 Gaussian footprint 几何
 - 红色矩形表示你为了加速而给它分配的 tile 覆盖区域
-- 右边热图能直接看出哪些 tile 会成为局部热点
+---
+
+## 📝 **本章练习题（实战导向）**
+
+### Q1: "为什么 3DGS 的实现顺序不能按'功能越多越好'来排？"
+
+从调试复杂度和反馈闭环的角度解释。
+
+<details>
+<summary>提示</summary>
+- 一次性实现所有功能 → bug 来源太多，无法定位
+- 分层构建：每一步都有清晰的验收标准
+- "慢速参考版" vs "优化版本"的对照设计
+</details>
+
+<details>
+<summary>答案</summary>
+
+**核心矛盾**: 3DGS 是一个**多层系统**，每层都有自己的数学约束和工程权衡。
+
+**错误做法**: 
+```python
+# ❌ 试图一次性实现所有功能
+render_3d_gaussians()
+apply_densification()
+optimize_with_L1_SSIM()
+tile_culling()
+mixed_precision()
+... # 20+ 个模块混在一起
+```
+
+→ **问题**: 当图像全黑时，你无法判断是：
+- 投影公式错了？
+- alpha blending 顺序错了？
+- densification 参数太激进？
+- loss 计算有问题？
+
+**正确做法（分层构建）**:
+
+1. **第 1 层**: 2D Gaussian footprint + alpha blending（沙盒环境，无 3D 投影）
+   - ✅ 验收：能渲染出几个椭圆叠加的图像
+   
+2. **第 2 层**: 加上 3D → 2D 投影
+   - ✅ 验收：overlay 显示的中心和椭圆与实际像素匹配
+   
+3. **第 3 层**: 最小训练闭环（L1 loss + 梯度更新）
+   - ✅ 验收:loss 下降，图像逐渐清晰
+
+4. **第 4 层**: densify/split/prune
+   - ✅ 验收：局部细节开始丰富，不会爆炸式增长
+
+5. **第 5 层**: 性能优化（tile culling, cache, etc.）
+   - ✅ 验收：速度提升 10-100 倍，质量不变
+
+**关键原则**: **"每一层一张检查图"** —— 每完成一层，保存中间结果作为调试依据。
+
+---
+
+### Q2: "为什么第一步更适合先做 2D Gaussian footprint + blending 沙盒？"
+
+从数学依赖和工程复杂度的角度解释。
+
+<details>
+<summary>提示</summary>
+- 3D → 2D 投影涉及 Jacobian、相机内参、外参等多重变换
+- 2D 高斯本身是独立概念：中心 + 协方差 + alpha blending
+- 先在屏幕空间验证算法，再引入 3D 复杂度
+</details>
+
+<details>
+<summary>答案</summary>
+
+**数学视角**: 2D Gaussian 的渲染公式是独立的：
+$$g(\mathbf{p}) = \exp\left(-\frac{1}{2} (\mathbf{p}-\boldsymbol{\mu}_{2d})^\top \boldsymbol{\Sigma}_{2d}^{-1} (\mathbf{p}-\boldsymbol{\mu}_{2d})\right)$$
+
+$$C(\mathbf{p}) = \sum_i T_i \cdot w_i \cdot c_i, \quad T_{i+1} = T_i(1-w_i)$$
+
+这个公式**不依赖 3D 投影**，可以单独验证。
+
+**工程视角**: 
+
+| 2D 沙盒 | 完整系统 |
+|--------|---------|
+| 参数：$\boldsymbol{\mu}_{2d}, \boldsymbol{\Sigma}_{2d}$ | 参数：$\boldsymbol{\mu}_{3d}, \boldsymbol{\Sigma}_{3d}$ |
+| 不需要相机内参/外参 | 需要 $K, R, \mathbf{t}$ |
+| 调试：改几个高斯就能看到效果 | 调试：需要理解投影误差来源 |
+
+**验证流程**:
+```python
+# Step 1: 创建几个 2D 高斯（手动指定中心、协方差）
+gaussians = [
+    {'mu': (90, 110), 'Sigma': [[900, 180], [180, 500]], 'alpha': 0.7, 'color': (1,0,0)},
+    {'mu': (130, 95), 'Sigma': [[650, -120], [-120, 420]], 'alpha': 0.65, 'color': (0,0,1)},
+]
+
+# Step 2: 渲染 + alpha blending
+image = render_2d_splatting(gaussians)
+
+# Step 3: 检查
+assert image.shape == (H, W, 3)  # ✅ 形状正确
+assert np.all(0 <= image) and np.all(image <= 1)  # ✅ 颜色在范围内
+```
+
+**结论**: "先验证核心算法，再引入复杂度"是工程黄金法则。
+
+---
+
+### Q3: "如果系统图像全黑、loss 不降、N 爆炸、速度很慢，你应该怎样按层拆问题？"
+
+提供一个分层的调试策略。
+
+<details>
+<summary>提示</summary>
+- 图像全黑 → 检查投影公式、深度排序、alpha blending
+- loss 不降 → 检查梯度流、学习率、loss 定义
+- N 爆炸 → 检查 densify/prune 阈值
+- 速度慢 → 先确认正确性，再优化性能
+</details>
+
+<details>
+<summary>答案</summary>
+
+**分层调试策略**:
+
+#### 🔴 **现象 1: 图像全黑**
+
+**排查顺序**:
+1. **投影公式**: $\boldsymbol{\mu}_{2d} = [f_x X/Z + c_x, f_y Y/Z + c_y]$
+   - 检查 $Z$ 是否 > 0（避免除零）
+   - 检查是否在相机前方
+
+2. **深度排序**: front-to-back blending 需要按 $Z$ 升序排列
+   - `sorted_gaussians = sorted(gaussians, key=lambda g: g['depth'])`
+
+3. **alpha blending**: 
+   ```python
+   C += T * w * c  # ← 检查这里有没有乘法
+   T *= (1 - w)    # ← 透射率是否快速衰减到 0？
+   ```
+
+4. **初始高斯位置**: 是否在相机视野外？
+   - overlay 显示投影中心，手动确认
+
+---
+
+#### 🔴 **现象 2: loss 不降**
+
+**排查顺序**:
+1. **梯度流检查**: 
+   ```python
+   for param in [mu, Sigma, alpha, color]:
+       print(f"{param.grad.abs().mean():.6f}")  # ← 梯度是否为 0？
+   ```
+   
+2. **学习率**: 太大 → 震荡；太小 → 不收敛
+   - 尝试：$1e-3 \to 1e-4 \to 1e-5$
+
+3. **loss 定义**: 
+   $$L = (1-\lambda)L_1 + \lambda(1-\text{SSIM})$$
+   - $\lambda=0.2$ 是经验值，可以微调
+   
+4. **初始条件**: 高斯是否离目标太远？
+   - SfM 点云质量差 → loss 难以优化
+
+---
+
+#### 🔴 **现象 3: N 爆炸（高斯数量指数增长）**
+
+**排查顺序**:
+1. **densify 触发频率**: 
+   ```python
+   if step % 100 == 0 and step > 1000:  # ← 太频繁了？
+       densify()
+   ```
+
+2. **阈值设置**:
+   - opacity < 0.005 → prune（不要太激进）
+   - gradient > threshold → split（梯度阈值太高？）
+
+3. **检查损失函数**: loss 一直很高 → densify 不断触发
+   - 先优化参数，再考虑增加高斯
+
+---
+
+#### 🔴 **现象 4: 速度慢**
+
+**排查顺序**:
+1. **确认正确性**: 先用小分辨率、少高斯跑通
+2. **Profile**: `cprofile`或`torch.profiler`找出瓶颈
+3. **优化策略**:
+   - Tile-based culling（从 $O(HW \cdot N) \to O(HW \cdot k)$）
+   - Mixed precision（FP16 训练）
+   - GPU kernel fusion
+
+**重要原则**: **"先正确，再快速"** —— 不要过早优化。
+
+---
+
+### Q4: "为什么 densify/split/prune 必须晚于一个已经成立的训练主链？"
+
+从数值稳定性和收敛角度解释。
+
+<details>
+<summary>提示</summary>
+- 初期参数变化大 → density 判断不准
+- 需要 loss 先收敛到一定程度再调整结构
+- 典型设置：前 1000-5000 步跳过 densification
+</details>
+
+<details>
+<summary>答案</summary>
+
+**核心矛盾**: 
+- **参数优化**（continuous）: $\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha, c$ 的梯度更新
+- **结构编辑**（discrete）: clone、split、prune
+
+这两者需要**解耦**：先让参数稳定，再调整结构。
+
+**过早 densify 的问题**:
+1. **梯度噪声大**: 初期 loss 曲面崎岖 → gradient-based density 判断不准
+2. **高斯数量失控**: 
+   - step=0: N=10K
+   - step=100: N=50K（densify）
+   - step=200: N=200K（densify）
+   - ... → 内存爆炸
+
+**正确时序**:
+```python
+for step in range(max_steps):
+    render()
+    compute_loss()
+    
+    # Step 1-3: 参数优化（前 5000 步只做这个）
+    if step < 5000:
+        optimize_parameters()
+        continue
+    
+    # Step 4: densify/prune（每 100 步执行一次）
+    if step % 100 == 0:
+        densify_based_on_gradients()
+        prune_low_opacity()
+    
+    optimize_parameters()
+```
+
+**经验法则**:
+- **前 K 步 (K=1000-5000)**: 只做参数优化，不 densify
+- **之后**: 每 100 步检查一次密度，根据 gradient magnitude 和 opacity 决定操作
+
+---
+
+## 🧠 **实战心法：为什么"慢速参考版"很重要？**
+
+在开始性能优化之前，先写一个**完全正确但缓慢的版本**：
+
+```python
+def render_naive(gaussians, camera):
+    """朴素实现：每个像素遍历所有高斯"""
+    H, W = 1024, 1024
+    image = np.zeros((H, W, 3))
+    
+    for y in range(H):
+        for x in range(W):
+            pixel_loss = []
+            for g in gaussians:
+                # 计算每个高斯对这个像素的贡献
+                w = compute_weight(g, (x,y), camera)
+                pixel_loss.append(w * g.color)
+            
+            image[y, x] = blend(pixel_loss)
+    
+    return image
+```
+
+**为什么需要这个版本？**
+1. **调试基准**: 当优化后的版本出问题时，用 naive 版对比结果
+2. **性能分析**: `timeit`测量各部分耗时，找出瓶颈
+3. **数学验证**: 确保优化没有引入数值误差
+
+**典型优化流程**:
+```
+Naive (O(HW·N)) → Profile → Optimize critical path → Verify against naive
+     ↓                    ↓               ↓                  ↓
+  1000 fps? No        Where's slow?   Tile culling      PSNR diff < 0.01
+                        (95% here!)    + LOD              ✅ Same quality, 60fps!
+```
+
+**记住**: "每一层一张检查图" —— 不要等到最后才发现问题。- 右边热图能直接看出哪些 tile 会成为局部热点
 - 直方图能告诉你：tile 负载是比较均匀，还是已经有明显重尾
 
 这段实验的价值不在于“得到最终图像”，而在于帮你建立一个非常重要的实现习惯：
