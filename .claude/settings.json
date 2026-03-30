@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -:*)"
+      "Bash(python3 -:*)",
+      "Bash(python \"/ntfs_shared/work/git/3dgs_tutorial/linear_algebra_practice/5_span.py\")"
     ]
   }
 }
