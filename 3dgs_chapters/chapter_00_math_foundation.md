@@ -639,6 +639,239 @@ plt.show()
 
 ## 七、本章核心记忆点
 
+---
+
+## 📝 **本章练习题（用第一性原理检验理解）**
+
+### Q1: "协方差矩阵为什么是 3D 椭球的'母语'？"
+
+如果要用一个数学对象描述"位置和形状"，为什么偏偏是高斯的 $\boldsymbol{\Sigma}$？
+
+**提示**:
+- 考虑旋转、缩放变换下，哪些表示能保持闭合性
+- 思考：如果换成其他分布（如均匀分布），投影后还是同一种分布吗？
+
+<details>
+<summary>答案</summary>
+
+**核心原因**: **高斯分布在线性变换下是封闭的**。
+
+假设 $\mathbf{X} \sim \mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$，经过线性变换 $\mathbf{Y} = \mathbf{A}\mathbf{X} + \mathbf{b}$：
+$$\mathbf{Y} \sim \mathcal{N}(\mathbf{A}\boldsymbol{\mu} + \mathbf{b}, \; \mathbf{A}\boldsymbol{\Sigma}\mathbf{A}^\top)$$
+
+**这意味什么？**
+- 3D 高斯经过旋转、平移、缩放后，**仍然是高斯**
+- 形状参数 $\boldsymbol{\Sigma}$ 可以简单地用矩阵乘法更新：$\boldsymbol{\Sigma}' = \mathbf{A}\boldsymbol{\Sigma}\mathbf{A}^\top$
+
+**对比其他表示**:
+| 分布 | 线性变换后 | 问题 |
+|------|----------|------|
+| **高斯** | 仍是高斯 ✅ | $\boldsymbol{\Sigma}$ 直接传播 |
+| 均匀分布 (体素) | 不再是均匀 ❌ | 形状参数丢失，无法追踪 |
+| 点云 | 仍是点 ❓ | 零维无体积，投影有空洞 |
+
+**工程价值**: 
+$$\boldsymbol{\Sigma}_\text{cam} = \mathbf{R}\boldsymbol{\Sigma}_\text{world}\mathbf{R}^\top$$
+→ **三次矩阵乘法**就完成形状变换，而不是重新学一个分布！
+
+这就是为什么 3DGS 选高斯：它的协方差矩阵是描述"3D 椭球形状"的**最小完备表示**。
+</details>
+
+---
+
+### Q2: "梯度的物理意义是什么？为什么它是'最优调整方向'？"
+
+从几何和优化的双重视角解释。
+
+<details>
+<summary>答案</summary>
+
+**几何视角**: 梯度是函数增长最快的方向。
+
+设 $f(\mathbf{x})$ 在 $\mathbf{x}_0$ 处可微，对任意单位向量 $\mathbf{v}$：
+$$\nabla f(\mathbf{x}_0)^\top \mathbf{v} = \|\nabla f(\mathbf{x}_0)\| \cos\theta$$
+
+其中 $\theta$ 是梯度方向与 $\mathbf{v}$ 的夹角。当 $\theta=0$（即沿梯度方向）时，$\cos\theta=1$，变化率最大！
+
+**优化视角**: 损失函数 $L(\boldsymbol{\theta})$ 的参数更新规则：
+$$\boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_t - \eta \nabla L(\boldsymbol{\theta}_t)$$
+
+为什么是负梯度？
+- 梯度指向**损失增长最快的方向**
+- **负梯度**指向**损失下降最快的方向**
+- $\eta$（学习率）控制步长大小
+
+**一阶泰勒展开验证**:
+$$L(\boldsymbol{\theta} + \Delta\boldsymbol{\theta}) \approx L(\boldsymbol{\theta}) + \nabla L(\boldsymbol{\theta})^\top \Delta\boldsymbol{\theta}$$
+
+要使 $L$ 下降最多，需要 $\nabla L^\top \Delta\boldsymbol{\theta}$ 最小 → $\Delta\boldsymbol{\theta} = -\eta \nabla L$。
+
+**3DGS 中的应用**:
+- 损失函数：$L = (1-\lambda)L_1 + \lambda(1-\text{SSIM})$
+- 参数：$\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha, c$
+- 梯度流：$\frac{\partial L}{\partial \boldsymbol{\mu}_i}$ → 告诉第 $i$ 个高斯"往哪移更准"
+
+**关键洞察**: "最优调整方向"不是绝对的最优，而是**在当前点的一阶近似下最快的下降方向**。
+</details>
+
+---
+
+### Q3: "为什么高斯分布的投影仍然是高斯？这个性质多重要？"
+
+从概率论和工程两个角度解释。
+
+<details>
+<summary>答案</summary>
+
+**数学推导**:
+
+设 3D 高斯 $\mathbf{X} \sim \mathcal{N}_3(\boldsymbol{\mu}, \boldsymbol{\Sigma})$，经过透视投影（局部线性化后）：
+$$\begin{bmatrix}u \\ v\end{bmatrix} = J \cdot \begin{bmatrix}x \\ y \\ z\end{bmatrix} + \mathbf{t}$$
+
+根据高斯分布的线性变换性质：
+$$\begin{bmatrix}u \\ v\end{bmatrix} \sim \mathcal{N}_2(J\boldsymbol{\mu}, J\boldsymbol{\Sigma}J^\top)$$
+
+**所以**: 3D 高斯的投影 = 2D 高斯，协方差是 $\boldsymbol{\Sigma}_{2d} = J \boldsymbol{\Sigma}_{3d} J^\top$。
+
+**为什么这个性质重要？**
+
+1. **解析解 vs 数值近似**:
+   - 如果没有这个性质：每帧都要对投影后的点云做高斯拟合（慢 + 不精确）
+   - 有了这个性质：**三次矩阵乘法**直接得到 2D footprint（快 + 精确）
+
+2. **可微性**:
+   $$\frac{\partial \boldsymbol{\Sigma}_{2d}}{\partial \boldsymbol{\Sigma}_{3d}} = J^\top (\cdot) J$$
+   → 梯度可以沿这条链反向传播到 3D 参数！
+
+3. **工程价值**:
+   - NeRF：每条光线采 128 点，每点查 MLP → $O(N \times \text{MLP})$
+   - 3DGS: $O(1)$ 投影 + alpha blending → **实时渲染**
+
+**核心结论**: "高斯投影后仍是高斯"不是巧合，而是**唯一能满足以下条件的分布**：
+- 有连续的形状参数（能表达各向异性）
+- 线性变换下封闭
+- 投影后有解析解
+
+这就是 3DGS 选高斯的**数学必然性**。
+</details>
+
+---
+
+### Q4: "链式法则的直观理解是什么？为什么它能做反向传播？"
+
+从计算图的角度解释。
+
+<details>
+<summary>答案</summary>
+
+**链式法则**: 
+$$\frac{\partial L}{\partial x} = \sum_y \frac{\partial L}{\partial y} \cdot \frac{\partial y}{\partial x}$$
+
+**直观理解**: "影响传递"。
+
+想象计算图：
+```
+L ← c ← w ← α ← μ (参数)
+     ↑   ↑    ↑
+   SSIM L1  blending
+```
+
+- $\alpha$变化 → $w$变化（$\frac{\partial w}{\partial \alpha} = g(p)$）
+- $w$变化 → $C$变化（$\frac{\partial C}{\partial w} = T(p) \cdot c$）
+- 所以 $\alpha$对最终损失的影响：$\frac{\partial L}{\partial \alpha} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial w} \cdot \frac{\partial w}{\partial \alpha}$
+
+**反向传播的本质**: **从输出到输入，沿着计算图"回溯影响"**。
+
+**3DGS 中的应用**:
+```python
+# 前向：渲染
+C = alpha_blending(gaussians, camera_params)
+
+# 反向：梯度流
+dL_dC = compute_loss_gradient(C, GT)  # d(loss)/d(pixels)
+dL_dw = dL_dC * T  # back through blending
+dL_dalpha = dL_dw * g(p)  # back through weighting
+dL_dSigma = ...  # back through projection (Jacobian!)
+dL_dmu = ...  # back through camera transform
+```
+
+**为什么链式法则有效？**
+- 假设所有函数都可微（3DGS 中大部分是）
+- 梯度可以逐层累乘传递
+- 最终得到每个参数的 $\frac{\partial L}{\partial \text{param}}$
+
+**关键洞察**: 反向传播不是"魔法"，就是链式法则在计算图上的自动化应用。
+</details>
+
+---
+
+## 🧠 **综合实战：用三把钥匙拆解一个复杂概念**
+
+### **Jacobian 矩阵的完整理解过程**
+
+#### Step 1: 术语翻译（它是什么体验？）
+> "Jacobian = 曲面在某点附近的局部线性近似矩阵"
+
+就像你把地球表面展开成地图：在某一点附近，弯曲的地球可以近似看成平面，这个平面的变换比例就是 Jacobian。
+
+---
+
+#### Step 2: 问题驱动追问（为什么必须存在？）
+
+**Q3DGS 中看到什么？** `Σ_2d = J @ Σ @ J.T`
+
+**之前怎么算？** → 数值近似：采样 10000 个点，拟合一个 2D 高斯
+- ❌ 慢：每次渲染都要做优化
+- ❌ 不精确：采样噪声大
+
+**Jacobian 让事情多简单？** → 三次矩阵乘法
+- ✅ 解析解：直接计算
+- ✅ 可微分：支持反向传播
+
+**不用它会怎样？** → 实时渲染不可能（慢 100 倍）
+
+---
+
+#### Step 3: 可视化（能在脑子里画出来吗？）
+
+```
+世界坐标系中的椭球 (Σ_world)
+        ╭───────╮
+       ╱    ●    ╲   ← 3D 高斯，向各个方向衰减
+      │     ●     │
+       ╰───────╯
+
+         ↓ 透视投影（非线性变换）
+         
+      [局部线性化]
+         
+屏幕上的椭圆 (Σ_2d = J Σ J^T)
+      ╭─────╮
+     ╱   ●   ╲   ← 投影后的 footprint，自动正确！
+    │    ●    │
+     ╰─────╯
+```
+
+**关键**: Jacobian $J$ 就是"局部展开的比例因子"。
+
+---
+
+## 🎯 **动手练习（可选）**
+
+如果你理解了上面的内容，尝试做这个：
+
+1. 给定一个 3D 高斯 $\boldsymbol{\mu} = [0, 0, 2]^\top$, $\boldsymbol{\Sigma} = \text{diag}(0.1, 0.1, 0.5)$
+2. 相机外参 $R=I, \mathbf{t}=[0, 0, 0]$（世界坐标和相机坐标相同）
+3. 内参 $f_x=f_y=1000, c_x=c_y=512$
+
+**问题**: 
+- 计算投影后的 2D 高斯参数 $\boldsymbol{\mu}_{2d}, \boldsymbol{\Sigma}_{2d}$
+- 这个椭圆在屏幕上看起来是什么形状？长轴方向如何？
+
+**提示**:
+$$J = \begin{bmatrix} f_x/Z & 0 & -f_x X / Z^2 \\ 0 & f_y/Z & -f_y Y / Z^2 \end{bmatrix}, \quad Z=2$$
+
+写完来告诉我，我来帮你检查理解是否到位。🎯
 ✅ **数学不是前置知识**——它是解决问题的自然延伸，每个概念都被具体问题逼出来的
 
 ✅ **线性代数的核心直觉**：
