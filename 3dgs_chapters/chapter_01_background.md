@@ -51,8 +51,8 @@ $$
 #### 射线重建公式：从像素到 3D 射线
 
 $$
-\text{像素 } (u,v) \rightarrow \text{归一化方向 } \mathbf{d} = R^\top K^{-1}[u, v, 1]^\top \\
-\text{射线 } r(t) = \mathbf{C} + t \cdot \mathbf{d}, \quad t > 0
+(u,v) \rightarrow \text{归一化方向 } \mathbf{d} = R^\top K^{-1}[u, v, 1]^\top \\
+r(t) = \mathbf{C} + t \cdot \mathbf{d}, \quad t > 0
 $$
 
 </details>
@@ -73,11 +73,13 @@ $$
 
 **直觉**：2D 图像由像素组成，那 3D 空间是不是可以由**体素**（体积像素）组成？
 
-```
-每个体素存储：
-- 颜色 c ∈ RGB  
-- 密度 σ > 0（表示这个位置有没有东西）
-```
+$$
+\begin{aligned}
+&\text{每个体素存储:} \\
+&\quad \bullet \; \text{颜色 } c \in \mathbb{R}^3 \text{ (RGB)} \\
+&\quad \bullet \; \text{密度 } \sigma > 0 \text{（表示这个位置有没有东西）}
+\end{aligned}
+$$
 
 ### 渲染公式：体积渲染方程
 
@@ -115,7 +117,7 @@ $$T(t) = \prod_{s=t_n}^t (1 - \sigma(s)ds) \approx \exp\left(-\int_{t_n}^t \sigm
 C = 0.0
 T_acc = 1.0  # 累积透射率
 
-for t in [t₁, t₂, ..., tₙ]:
+for t in [t_1, t_2, ..., t_N]:
     alpha = 1 - exp(-sigma * dt)  # 该段的"不透明度"
     C += T_acc * alpha * color    # 当前段对最终颜色的贡献
     T_acc *= (1 - alpha)          # 更新透射率（前面物体的遮挡）
@@ -128,9 +130,9 @@ for t in [t₁, t₂, ..., tₙ]:
 **公理**：如果空间分辨率从 $V$ 翻倍到 $2V$，体素数量变成 $(2V)^3 = 8V^3$ ——**立方增长**！
 
 算一笔账：
-- **128³网格** = 209 万个体素 → ✅ 可接受
-- **512³网格** = **1.34 亿个体素** → ❌ 每个存 RGB+σ = 512MB（还只是存储）
-- **1024³网格** = **10.7 亿个体素** → ❌ **需要 4GB 只存密度和颜色！**
+- **128³网格** = 2.09×10⁶个体素 → ✅ 可接受
+- **512³网格** = **1.34×10⁸个体素** → ❌ 每个存 RGB+σ = 512MB（还只是存储）
+- **1024³网格** = **1.07×10⁹个体素** → ❌ **需要 4GB 只存密度和颜色！**
 
 而且大部分空间是空的（桌子后面、墙里面），我们付了钱却没用到。
 
@@ -143,7 +145,7 @@ for t in [t₁, t₂, ..., tₙ]:
 如果 90% 的空间都是空气，**只存储有东西的地方**：
 
 $$
-\text{每个点 } p_i = (\mathbf{x}_i, r, g, b), \quad \mathbf{x}_i \in \mathbb{R}^3
+p_i = (\mathbf{x}_i, c_i), \quad \mathbf{x}_i \in \mathbb{R}^3, \; c_i \in [0,1]^3
 $$
 
 **优势**：内存从 $V^3$ 降到 $N$（$N$是点的数量），而且通常 $N \ll V^3$。
@@ -209,15 +211,15 @@ $$
 
 **步骤 1: 位置编码（Positional Encoding）**
 ```python
-# 输入 x = [x₁, x₂, x₃] ∈ ℝ³ → γ(x) ∈ ℝ¹⁸ (L=6 层频率)
-γ(x) = [sin(2⁰x), cos(2⁰x), sin(2¹x), cos(2¹x), ..., sin(2⁵x), cos(2⁵x)]
+# 输入 x = [x_1, x_2, x_3] ∈ R^3 → γ(x) ∈ R^{18} (L=6 层频率)
+γ(x) = [sin(2⁰*x), cos(2⁰*x), sin(2¹*x), cos(2¹*x), ..., sin(2⁵*x), cos(2⁵*x)]
 ```
 
 **为什么？** 高频正弦编码让 MLP 能学习细节（否则 MLP 倾向于低频平滑函数）。
 
 **步骤 2: 主网络（密度 + 粗略颜色）**
 ```
-γ(x) [18 维] → FC[256]→ReLU × 8 层 → [σ, p]
+γ(x) [18 维] → FC[256]→ ReLU × 8 层 → [σ, p]
                                       ↑
                                    [1+3 维]
 # σ: 密度（sigmoid+exp 保证>0）  
@@ -226,7 +228,7 @@ $$
 
 **步骤 3: 颜色子网络（视角相关）**
 ```
-[γ(x)[6 维], γ(d)[4 维], p[3 维]] → FC[128]→ReLU × 2 层 → c ∈ RGB
+[γ(x)[6 维], γ(d)[4 维], p[3 维]] → FC[128]→ ReLU × 2 层 → c ∈ RGB
 
 # d: 视线方向 (view direction)  
 # γ(d): 只有低频编码（颜色变化是平滑的）
@@ -279,7 +281,7 @@ $$
 ```python
 # 每射线采样点的位置是完全不规则的！
 for pixel in image:
-    for sample_t in [t₁, t₂, ..., t₁₀₀]:
+    for sample_t in [t_1, t_2, ..., t_100]:
         x = ray_origin + sample_t * ray_direction  # 随机位置
         color = MLP(x)  # 每次访问不同的权重缓存行 → Cache Miss!
 ```
@@ -438,16 +440,18 @@ $$
 
 回到我们的 1920×1080 场景：
 
-```
-NeRF: 
-- 2M 像素 × 100 采样 = 2 亿次 MLP 查询
-
-3DGS（典型场景）:
-- 约 1M 个高斯（根据场景复杂度调整）
-- 每个高斯投影一次 → O(1)计算  
-- **总操作数**: ~1M 次投影
-
-对比：理论加速比 ≈ **200 倍**（2 亿 vs 1 百万）
+```math
+\begin{aligned}
+&\text{NeRF: } \\
+&\quad \bullet \; 2\times10^6 \text{ 像素} \times 100 \text{ 采样} = 2\times10^8 \text{次 MLP 查询} \\
+\\
+&\text{3DGS（典型场景）:} \\
+&\quad \bullet \; \approx 10^6 \text{ 个高斯} \\
+&\quad \bullet \; \text{每个高斯投影一次} \rightarrow O(1)\text{计算} \\
+&\quad \bullet \; \text{总操作数: } \approx 10^6 \text{次投影} \\
+\\
+&\text{对比：理论加速比} \approx \frac{2\times10^8}{10^6} = \mathbf{200\text{ 倍}} \text{（2 亿 vs 1 百万）}
+\end{aligned}
 ```
 
 而且这还没算上 GPU 利用率的差距（NeRF <10%，3DGS >70%）。
@@ -460,11 +464,13 @@ NeRF:
 **从两个维度对比**:
 
 **1. FLOPs 减少 (理论计算量)**:
-```
-NeRF: O(像素数 × 采样数) = 2M × 100 = 2 亿次 MLP 查询
-3DGS: O(高斯数) = 1M 次投影
-
-理论加速比：2 亿 / 100 万 = **200 倍**
+```math
+\begin{aligned}
+&\text{NeRF: } O(\text{像素数} \times \text{采样数}) = 2\times10^6 \times 100 = 2\times10^8 \text{次 MLP 查询} \\
+&\text{3DGS: } O(\text{高斯数}) = 10^6 \text{次投影} \\
+\\
+&\text{理论加速比：}\frac{2\times10^8}{10^6} = \mathbf{200\text{ 倍}}
+\end{aligned}
 ```
 
 **2. GPU 利用率提升（实际运行效率）**:
@@ -489,11 +495,10 @@ NeRF:
 - 3DGS 的瓶颈在**计算能力**（compute bound，可以跑满 GPU）
 - 从 memory-bound → compute-bound = **10-20 倍额外加速**
 
-**完整公式**:
-```
-总加速比 = (FLOPs 减少) × (GPU 利用率提升)
-        ≈ 200 × 15 
-        ≈ 3000 倍 ✅
+```math
+\text{总加速比} = (\text{FLOPs 减少}) \times (\text{GPU 利用率提升})
+               \approx 200 \times 15 
+               \approx 3000 \text{ 倍 ✅}
 ```
 
 </details>
