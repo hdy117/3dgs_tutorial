@@ -649,7 +649,142 @@ projection / sorting / tile mapping / blending / memory bandwidth
 
 ---
 
+---
+
+## 📝 **本章练习题**
+
+### Q1: "Tile-based rendering 为什么比朴素遍历快？"
+
+假设图像分辨率 $H \times W = 1024^2$，高斯数量 $N = 500,000$，估算两种方法的复杂度差异。
+
+<details>
+<summary>提示</summary>
+- 朴素：每个像素遍历所有 N 个高斯 → O(HW·N)
+- Tile-based：每个 tile 只处理覆盖它的高斯 → 每 pixel 只看 k 个 (k << N)
+- 500K 高斯 × 1M 像素 = 5×10¹¹次计算 vs 可能只有 5×10⁶~10⁷
+</details>
+
+<details>
+<summary>答案</summary>
+**朴素遍历复杂度**:
+$$O(H \cdot W \cdot N) = O(1024^2 \cdot 500,000) \approx O(5 \times 10^{11})$$
+→ **5000 亿次计算**,GPU 也要跑很久
+
+**Tile-based culling**:
+- 屏幕分成 $16 \times 16$ tiles → ~4000 个 tile
+- 每个高斯只覆盖少数几个 tile（根据 $\Sigma_2d$ 的 k-sigma 包围盒）
+- 每个 pixel 只看自己所在 tile 的相关高斯
+
+假设平均每个 tile 有 $k \approx 50$ 个相关高斯：
+$$O(H \cdot W \cdot k) = O(1024^2 \cdot 50) \approx O(5 \times 10^7)$$
+→ **5000 万次计算**,快了**100 倍**!
+
+**核心**: Gaussian 的局部性 → 不用看全局，只看局部相关。
+</details>
+
+### Q2: "SH (Spherical Harmonics) 阶数怎么选？"
+
+为什么默认用 order=1 (5 coefficients)?order=3(16 coeffs)会怎样？
+
+<details>
+<summary>提示</summary>
+- SH 阶数越高 → 能表达更复杂的视角相关颜色（镜面反射）
+- 但参数越多 → 内存和训练难度增加
+- order=1: 5 coefficients, order=3: 16 coefficients
+</details>
+
+<details>
+<summary>答案</summary>
+**SH (球谐函数)**: 用于表达**视角相关的颜色**（view-dependent appearance）。
+
+| Order | Coefficients | 能表达的效应 | 内存/高斯 |
+|-------|-------------|-------------|----------|
+| **0** | 1 | 无视角依赖（颜色固定） | ~52 MB/M |
+| **1** | 5 | 基础漫反射 + 简单高光 | ~68 MB/M |
+| **3** | 16 | 复杂镜面反射、各向异性 | ~130 MB/M |
+
+**默认 order=1 的原因**:
+- 大多数场景的视角依赖可以用 5 个系数近似
+- 内存开销适中（~68 bytes/高斯 vs 48 bytes for fixed color）
+- 训练收敛快，不易过拟合
+
+**什么时候用 order=3?**
+- **强镜面反射**: 金属、 glossy surfaces
+- **各向异性材质**: 头发、丝绸等
+
+**权衡公式**:
+$$\text{总内存} \approx N \cdot (48 + 12 \cdot (\text{order}+1)^2) \text{ bytes}$$
+
+3DGS 默认 order=1 是工程上的合理折衷。
+</details>
+
+### Q3: "4DGS 和静态 3DGS 的核心区别是什么？"
+
+如果要在动态场景中使用，需要修改哪些部分？
+
+<details>
+<summary>提示</summary>
+- 3DGS: $\boldsymbol{\mu}(t), \Sigma(t)$ 固定不变
+- 4DGS: 引入时间参数 $t$ → $\boldsymbol{\mu}(\mathbf{x}, t), \dots$
+- 需要额外模型预测每个时刻的高斯参数
+</details>
+
+<details>
+<summary>答案</summary>
+**静态 3DGS**:
+$$\text{高斯集合} = \{ (\boldsymbol{\mu}_i, \Sigma_i, c_i, \alpha_i) \}_{i=1}^N$$
+→ **所有参数固定**,只能重建单帧场景
+
+**4DGS (动态 3DGS)**:
+$$\text{高斯集合}(t) = \{ (\boldsymbol{\mu}_i(t), \Sigma_i(t), c_i(t), \alpha_i(t)) \}_{i=1}^N$$
+→ **参数随时间变化**,需要预测函数
+
+**核心修改**:
+1. **时空参数化**: 用 MLP/变形网络预测 $\mathbf{x}(t) = f(\mathbf{x}_0, t)$
+2. **额外监督**: 需要多时刻的视频帧作为训练数据
+3. **物理约束**: 添加运动平滑性正则化，避免抖动
+
+**内存代价**:
+- 静态：~50 bytes/高斯
+- 4DGS: ~100-200 bytes/高斯 (加上时间参数)
+
+**应用场景**: 
+- 3DGS → 静态场景（建筑、物体扫描）
+- 4DGS → 动态场景（人走路、动物运动）
+</details>
+
+---
+
 ## 十四、本章你真正应该能自己重建的几个问题
+
+读完以后，遮住正文，你至少应该能自己回答:
+
+1. Tile-based rendering 的复杂度优化原理是什么？
+2. SH 阶数对内存和视觉效果的影响如何量化？
+3. 为什么 4DGS 需要额外的时间参数化？
+4. 实时渲染时，front-to-back blending 如何结合 early stop？
+5. 如果要在移动端部署 3DGS，最优先优化的部分是什么？
+
+如果这些问题你能自己从头推回来，这一章就真的进脑子了。
+
+---
+
+## 十五、下一章接什么
+
+（注：本项目只到 Chapter 08，没有后续的 Ch09-11）
+
+现在你已经知道:
+
+- 训练循环的完整流程
+- densify/split/prune 的触发条件
+- Tile-based rendering 为什么快 100 倍
+- SH 阶数选择对内存和效果的影响
+
+**如果你要深入**:
+- **4DGS (动态场景)** → 需要学变形场、时序建模
+- **Feed-Forward GS (即时重建)** → 需要学神经网络直接输出高斯参数
+
+这两块是 3DGS 生态的"下一步",但已经超出了本教程的核心范围。🎉## 十四、本章你真正应该能自己重建的几个问题
 
 读完以后，遮住正文，你至少应该能自己回答：
 
