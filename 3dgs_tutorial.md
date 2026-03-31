@@ -30,7 +30,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - **概率论**：高斯分布的闭合性质——投影后还是高斯（选择它的真正原因）
 - **学习策略**：Just-in-Time + 代码优先 + 跳过证明细节
 
-文件：`chapters/chapter_00_math_foundation.md`
+文件：`3dgs_chapters/chapter_00_math_foundation.md`
 
 ---
 
@@ -43,7 +43,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - 传统方法回顾（MVS、NeRF）及其瓶颈
 - 为什么需要新思路？
 
-文件：`chapters/chapter_01_background.md`
+文件：`3dgs_chapters/chapter_01_background.md`
 
 ---
 
@@ -56,7 +56,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - 体素网格 → 点云 → MLP → 高斯的演进路径
 - 每个阶段的矛盾如何驱动下一步发明
 
-文件：`chapters/chapter_02_representation_evolution.md`
+文件：`3dgs_chapters/chapter_02_representation_evolution.md`
 
 ---
 
@@ -70,7 +70,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - **Solution Path**：协方差矩阵定义高斯椭球 + Splatting 投影
 - **为什么高斯是唯一答案**（旋转不变性 + 闭合解）
 
-文件：`chapters/chapter_03_gaussian_splatting.md`
+文件：`3dgs_chapters/chapter_03_gaussian_splatting.md`
 
 ---
 
@@ -84,7 +84,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - Alpha blending 的排序问题与深度缓冲
 - 反向传播通过渲染管线（为什么是可微的）
 
-文件：`chapters/chapter_04_differentiable_rendering.md`
+文件：`3dgs_chapters/chapter_04_differentiable_rendering.md`
 
 ---
 
@@ -98,7 +98,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - 自适应密度控制（densification/pruning）的触发条件
 - 损失函数权重调参的经验法则
 
-文件：`chapters/chapter_05_optimization.md`
+文件：`3dgs_chapters/chapter_05_optimization.md`
 
 ---
 
@@ -112,7 +112,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - 尺度估计与协方差初始化（各向同性 vs 各向异性）
 - 数据集格式适配（nerf_synthetic、real_blender）
 
-文件：`chapters/chapter_06_data_preparation.md`
+文件：`3dgs_chapters/chapter_06_data_preparation.md`
 
 ---
 
@@ -126,7 +126,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - 学习率调度与收敛判断
 - PSNR/SSIM/LPIPS监控与诊断工具
 
-文件：`chapters/chapter_07_training_loop.md`
+文件：`3dgs_chapters/chapter_07_training_loop.md`
 
 ---
 
@@ -140,7 +140,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - 混合精度推理（float16 + Tensor Core 加速）
 - Kernel Fusion 与 SoA 内存布局
 
-文件：`chapters/chapter_08_inference_optimization.md`
+文件：`3dgs_chapters/chapter_08_inference_optimization.md`
 
 ---
 
@@ -154,7 +154,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - **Week 3: 让它飞**（float16 + 缓存策略 + CUDA，可选）
 - 调试清单与常见问题速查表
 
-文件：`chapters/chapter_09_practice_path.md`
+文件：`3dgs_chapters/chapter_09_practice_path.md`
 
 ---
 
@@ -168,7 +168,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - **混合变形架构**：静态高斯（70%）+ 刚体 SE(3) 变换（20%）+ MLP 非刚体（10%）
 - **时序约束利用**：motion parallax 辅助深度估计
 
-文件：`chapters/chapter_10_4d_gaussian.md`
+文件：`3dgs_chapters/chapter_10_4d_gaussian.md`
 
 ---
 
@@ -182,7 +182,7 @@ _从问题出发，到 feed-forward 推理的完整学习路径_
 - **混合范式**：feed-forward warm start + few-shot fine-tuning（2s+5min ≈ 传统 30min 质量）
 - 终极形态展望：One Model Fits All
 
-文件：`chapters/chapter_11_feedforward_gaussian.md`
+文件：`3dgs_chapters/chapter_11_feedforward_gaussian.md`
 
 ---
 
