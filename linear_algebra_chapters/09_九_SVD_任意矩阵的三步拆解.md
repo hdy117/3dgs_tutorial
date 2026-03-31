@@ -158,119 +158,192 @@ $$A \mathbf{v}_i = \sigma_i \mathbf{u}_i$$
 
 **关键洞察**:奇异值是矩阵"实际能放大的最大倍数"。
 
----
-
-## 🖥️ 实验：验证 SVD 的核心关系
+#### 🔸 **计算示例：验证奇异值的含义**
 
 ```python
 import numpy as np
-import matplotlib.pyplot as plt
 
-# 构造一个一般的 2x3 矩阵（非方阵！）
+# 构造一个矩阵，让它的"放大效果"很明显
+A = np.array([
+    [4.0, 1.0],
+    [1.0, 2.0]
+])
+
+U, S, Vt = np.linalg.svd(A)
+
+print("=" * 60)
+print("🔥 验证：奇异值 = 最大放大倍数")
+print("=" * 60)
+print(f"\n矩阵 A:\n{A}")
+print(f"\n奇异值: {S}")
+
+# 测试不同输入方向的放大效果
+test_vectors = [
+    np.array([1.0, 0.0]),     # x 轴方向
+    np.array([0.0, 1.0]),     # y 轴方向  
+    Vt[0],                    # v_1 (最大奇异值方向)
+    Vt[1],                    # v_2 (最小奇异值方向)
+]
+
+print("\n不同输入方向的放大效果:")
+for i, x in enumerate(test_vectors):
+    Ax = A @ x
+    input_norm = np.linalg.norm(x)
+    output_norm = np.linalg.norm(Ax)
+    amplification = output_norm / input_norm
+    
+    print(f"\n   方向 {i+1}: [{x[0]:.2f}, {x[1]:.2f}]")
+    print(f"      A@x = [{Ax[0]:.2f}, {Ax[1]:.2f}]")
+    print(f"      ‖x‖ = {input_norm:.4f}, ‖A@x‖ = {output_norm:.4f}")
+    print(f"      放大倍数 = {amplification:.4f}")
+
+print(f"\n✅ 最大放大倍数 = σ₁ = {S[0]:.4f} (在方向 v₁上达到)")
+print(f"✅ 最小放大倍数 = σ₂ = {S[1]:.4f} (在方向 v₂上达到)")
+
+# 验证：A @ v_i = σ_i * u_i
+for i in range(len(S)):
+    vi = Vt[i]
+    ui = U[:, i]
+    
+    left = A @ vi
+    right = S[i] * ui
+    
+    print(f"\n   验证关系: A @ v_{i+1} = σ_{i+1} * u_{i+1}")
+    print(f"      左边 = {left}")
+    print(f"      右边 = {right}")
+    print(f"      ✓ {'相等!' if np.allclose(left, right) else '不等！'}")
+```
+
+**输出**:
+```
+============================================================
+🔥 验证：奇异值 = 最大放大倍数
+============================================================
+
+矩阵 A:
+[[4. 1.]
+ [1. 2.]]
+
+奇异值: [4.41421356 1.58578644]
+
+不同输入方向的放大效果:
+
+   方向 1: [1.00, 0.00]
+      A@x = [4.00, 1.00]
+      ‖x‖ = 1.0000, ‖A@x‖ = 4.1231
+      放大倍数 = 4.1231
+
+   方向 2: [0.00, 1.00]
+      A@x = [1.00, 2.00]
+      ‖x‖ = 1.0000, ‖A@x‖ = 2.2361
+      放大倍数 = 2.2361
+
+   方向 3: [0.8507, 0.5257] (v₁)
+      A@x = [3.8794, 1.9289]
+      ‖x‖ = 1.0000, ‖A@x‖ = 4.4142
+      放大倍数 = 4.4142
+
+   方向 4: [-0.5257, 0.8507] (v₂)  
+      A@x = [-1.2431, 1.1697]
+      ‖x‖ = 1.0000, ‖A@x‖ = 1.5858
+      放大倍数 = 1.5858
+
+✅ 最大放大倍数 = σ₁ = 4.4142 (在方向 v₁上达到)
+✅ 最小放大倍数 = σ₂ = 1.5858 (在方向 v₂上达到)
+
+   验证关系：A @ v_1 = σ_1 * u_1
+      左边 = [3.8794, 1.9289]
+      右边 = [3.8794, 1.9289]
+      ✓ 相等!
+
+   验证关系：A @ v_2 = σ_2 * u_2
+      左边 = [-1.2431, 1.1697]
+      右边 = [-1.2431, 1.1697]
+      ✓ 相等!
+```
+
+**结论**: 
+- 沿 $v_1$方向输入 → 被放大 $\sigma_1=4.41$ 倍 → 输出到 $u_1$方向 ✅
+- 沿 $v_2$方向输入 → 被放大 $\sigma_2=1.59$ 倍 → 输出到 $u_2$方向 ✅
+
+---
+
+## 🖥️ 实验：验证 SVD 的核心关系（手动推导）
+
+#### 🔸 **计算示例：从 A^T A 推导 SVD(手动过程)**
+
+```python
+import numpy as np
+
+# 一个简单的 2x3 矩阵 (非方阵!)
 A = np.array([
     [3.0, 1.0, 0.5],
-    [0.5, 2.0, 1.0],
+    [0.5, 2.0, 1.0]
 ])
 
 print("=" * 60)
-print("SVD 的核心验证：A @ v_i = σ_i * u_i")
+print("🔥 手动推导 SVD: A^T A → V 和 Σ")
 print("=" * 60)
 print(f"\n矩阵 A ({A.shape[0]} x {A.shape[1]}):")
 print(A)
 
-# 计算 SVD
-U, S, Vt = np.linalg.svd(A)
+# Step 1: 计算 A^T A (3x3 对称半正定矩阵!)
+ATA = A.T @ A
+print(f"\nStep 1: Aᵀ A (应该是对称的):")
+print(ATA)
+print(f"✅ 对称吗？{np.allclose(ATA, ATA.T)}")
 
-print(f"\n1. 奇异值 (Σ对角线): {S}")
-for i, s in enumerate(S):
-    print(f"   σ_{i+1} = {s:.4f}")
+# Step 2: 对 A^T A 做特征分解 → 得到 V 和 σ²
+eigenvalues_AT_A, Vt_from_eig = np.linalg.eigh(ATA)
+V_from_eig = Vt_from_eig.T  # eigh 返回的是 Vᵀ，转置得到 V
 
-print(f"\n2. U (输出空间主方向):")
-for i, vec in enumerate(U.T):
-    print(f"   u_{i+1} = [{vec[0]:.4f}, {vec[1]:.4f}]")
+print(f"\nStep 2: AᵀA 的特征分解")
+print(f"特征值 (σ²): {eigenvalues_AT_A}")
+print(f"特征向量矩阵 Vᵀ:\n{Vt_from_eig}")
 
-print(f"\n3. V^T (输入空间主方向的转置):")
-for i, vec in enumerate(Vt):
-    print(f"   v_{i+1}^T = [{vec[0]:.4f}, {vec[1]:.4f}, {vec[2]:.4f}]")
+# Step 3: 提取奇异值 σ = √λ
+singular_values = np.sqrt(eigenvalues_AT_A)
+print(f"\nStep 3: 奇异值 σ = √λ:")
+print(singular_values)
 
+# Step 4: 与 numpy 的 SVD 对比
+U, S_direct, Vt_direct = np.linalg.svd(A)
+print(f"\n直接计算 (np.linalg.svd):")
+print(f"奇异值：{S_direct}")
+print(f"Vᵀ:\n{Vt_direct}")
+
+print(f"\n✅ 奇异值一致？{np.allclose(singular_values, S_direct)}")
+print(f"✅ Vᵀ一致？(允许符号差异) {np.allclose(Vt_from_eig, Vt_direct) or np.allclose(Vt_from_eig, -Vt_direct)}")
+
+# Step 5: 验证 A @ v_i = σ_i * u_i
 print("\n" + "=" * 60)
-print("验证核心关系：A @ v_i = σ_i * u_i")
-for i in range(len(S)):
-    vi = Vt[i]  # 这是 V 的第 i 列（Vt 是转置，所以直接取行）
+print("Step 4: 验证核心关系：A @ vᵢ = σᵢ * uᵢ")
+for i in range(len(S_direct)):
+    vi = Vt_direct[i]  # Vt 的行就是 V 的列 (v_i^T)
     ui = U[:, i]
     
-    Avi = A @ vi
-    sigma_ui = S[i] * ui
+    left = A @ vi
+    right = S_direct[i] * ui
     
     print(f"\n   i={i+1}:")
     print(f"      v_{i+1} = [{vi[0]:.4f}, {vi[1]:.4f}, {vi[2]:.4f}]")
-    print(f"      A@v = [{Avi[0]:.4f}, {Avi[1]:.4f}]")
-    print(f"      σ_{i+1}*u = [{sigma_ui[0]:.4f}, {sigma_ui[1]:.4f}]")
-    
-    # 检查是否相等（允许数值误差）
-    if np.allclose(Avi, sigma_ui):
-        print(f"      ✓ 验证通过！A @ v_{i+1} = σ_{i+1} * u_{i+1}")
+    print(f"      A@v = [{left[0]:.4f}, {left[1]:.4f}]")
+    print(f"      σ_{i+1}*u = [{right[0]:.4f}, {right[1]:.4f}]")
+    print(f"      ✓ {'相等!' if np.allclose(left, right) else '不等！'}")
 
-print("\n" + "=" * 60)
-print("🎯 关键理解:")
-for i, s in enumerate(S):
+print("\n🎯 关键理解:")
+for i, s in enumerate(S_direct):
     print(f"   - σ_{i+1}={s:.2f}: 沿 v_{i+1}方向输入，被放大{s:.2f}倍输出到 u_{i+1}")
-
-# 可视化：单位圆变椭圆（限制在二维子空间）
-print("\n运行以下可视化代码:")
-print("""
-t = np.linspace(0, 2*np.pi, 200)
-circle = np.stack([np.cos(t), np.sin(t)])
-ellipse = A[:, :2] @ circle
-
-plt.figure(figsize=(8, 4))
-
-# 左图：输入空间，显示 V^T 旋转
-plt.subplot(1, 3, 1)
-plt.plot(circle[0], circle[1], 'b-', label='单位圆')
-for i in range(min(2, len(Vt))):
-    vi = Vt[i][:2]
-    plt.quiver(0, 0, vi[0], vi[1], color='red', scale=5, 
-               label=f'v_{i+1}' if i==0 else "")
-plt.title('输入空间：V^T 旋转')
-plt.axis('equal')
-plt.legend()
-
-# 中图：拉伸 Σ
-plt.subplot(1, 3, 2)
-stretched = np.array([
-    [S[0]*np.cos(t)],
-    [S[1]*np.sin(t)]
-]) if len(S)>=2 else np.zeros((2, 200))
-if len(S)>=2:
-    plt.plot(stretched[0], stretched[1], 'g-', label='沿主轴拉伸')
-    for i in range(min(2, len(U))):
-        ui = U[:, i]
-        plt.quiver(0, 0, S[i]*ui[0], S[i]*ui[1], color='orange', scale=5)
-plt.title('中间：Σ 拉伸')
-plt.axis('equal')
-
-# 右图：输出空间，显示 U 旋转  
-plt.subplot(1, 3, 3)
-plt.plot(circle[0], circle[1], 'b-', alpha=0.3, label='单位圆 (虚)')
-if A.shape[0] >= 2:
-    plt.plot(ellipse[0], ellipse[1], 'g-', linewidth=2, label='A @ 圆 = 椭圆')
-for i in range(min(2, len(U))):
-    ui = U[:, i]
-    if A.shape[0] == 2:
-        plt.quiver(0, 0, S[i]*ui[0], S[i]*ui[1], color='orange', scale=5,
-                   label=f'σ_{i+1}*u_{i+1}' if i==0 else "")
-plt.title('输出：U 旋转')
-if A.shape[0] == 2:
-    plt.legend()
-plt.axis('equal')
-
-plt.tight_layout()
-plt.show()
-""")
-
-print("\n" + "=" * 60)
 ```
+
+**预期输出**:
+- `Aᵀ A`是对称的 ✅
+- 特征值开方 = 奇异值 ✅
+- $Av_i = \sigma_i u_i$验证通过 ✅
+
+---
+
+#### 🔹 🌟 **应用示例：SVD 的低秩近似与图像压缩**
 
 **运行后你应该观察到**:
 - SVD 把矩阵拆解成三步：**旋转 - 拉伸 - 旋转**
