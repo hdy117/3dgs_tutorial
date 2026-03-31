@@ -13,14 +13,10 @@
 
 ```
 /ntfs_shared/work/git/3dgs_tutorial/
-├── linear_algebra_chapters/      # Markdown 教程 (15 章，共~8000+行)
-│   ├── README.md                  # 目录和导航
-│   ├── chapter_XX_*.md           # 各章节内容
-│   └── ...                        # 第 0-15 章完整内容
-├── code/notebooks/               # Jupyter Notebook Python 脚本库 (新建!)
-│   ├── README.md                  # Notebook 使用说明
-│   ├── convert_to_notebook.py    # .py → .ipynb转换器
-│   ├── chapter_01_to_07_basics.py      # 基础概念实验 (3-7 章)
+├── linear_algebra_chapters/      # Markdown 教程 + Python Notebook 脚本库 (整合在一起!)
+│   ├── README.md                  # 目录、导航和运行说明
+│   ├── chapter_XX_*.md           # 各章节 Markdown 内容 (Ch0-Ch15)
+│   ├── chapter_01_to_07_basics.py       # 基础概念实验 (3-7 章)
 │   ├── chapter_05_eigenvalue.py          # 特征值验证 (第 8 章)
 │   ├── chapter_06_svd.py                   # SVD三步拆解 (第 9 章)
 │   ├── chapter_08_3dgs_practical.py        # 3DGS实战应用 (第 11 章)
@@ -59,22 +55,22 @@
 
 ---
 
-## 💻 **新增 Jupyter Notebook Python 代码库**
+## 💻 **新增 Python 实验脚本 (2026-03-31)**
 
-### 📝 **本次创建的文件** (2026-03-31)
+### 📝 **核心章节文件** (已整合到 linear_algebra_chapters/)
 
-| 文件名 | 对应章节 | 核心内容 |
-|--------|---------|---------|
-| `chapter_01_to_07_basics.py` | Ch03-Ch07 | 向量点积/基变换/矩阵推网格/协方差椭球/行列式秩 |
-| `chapter_05_eigenvalue.py` | Ch08 | Av=λv验证/特征分解/幂迭代法/对称性对比 |
-| `chapter_06_svd.py` | Ch09 | SVD核心关系/A^TA推导/Eckart-Young定理/PCA=SVD |
-| `chapter_08_3dgs_practical.py` | Ch11 | 世界→相机空间变换/投影 Jacobian/屏幕 footprint |
-| `chapter_09_common_mistakes.py` | Ch12 | 5 个误解验证 (线性 vs 仿射/主动被动变换等) |
-| `chapter_10_all_experiments.py` | Ch13 | 向量投影/矩阵推网格/协方差椭圆/特征方向/SVD三步拆解 |
+| 文件名 | 对应章节 | 核心内容 | 大小 |
+|--------|---------|---------|------|
+| `chapter_01_to_07_basics.py` | Ch03-Ch07 | 向量点积/基变换/矩阵推网格/协方差椭球/行列式秩 | 8.7K |
+| `chapter_05_eigenvalue.py` | Ch08 | Av=λv验证/特征分解/幂迭代法/对称性对比 | 11K |
+| `chapter_06_svd.py` | Ch09 | SVD核心关系/A^TA推导/Eckart-Young定理/PCA=SVD | 9.8K |
+| `chapter_08_3dgs_practical.py` | Ch11 | 世界→相机空间变换/投影 Jacobian/屏幕 footprint | 11K |
+| `chapter_09_common_mistakes.py` | Ch12 | 5 个误解验证 (线性 vs 仿射/主动被动变换等) | 14K |
+| `chapter_10_all_experiments.py` | Ch13 | 向量投影/矩阵推网格/协方差椭圆/特征方向/SVD三步拆解 | 18K |
 
 ### 🛠️ **辅助工具**
 
-- `convert_to_notebook.py`: 批量转换 .py → .ipynb
+- `convert_to_notebook.py`: 批量转换 .py → .ipynb (可选)
 - `README.md`: Notebook 使用说明和章节对照表
 
 ---
