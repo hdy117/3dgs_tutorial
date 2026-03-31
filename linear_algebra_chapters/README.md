@@ -1,77 +1,80 @@
-# 线性代数教程 - 章节索引
+# 线性代数教程 - Jupyter Notebook 代码库
 
-**源文件**: `linear_algebra.md`  
-**输出目录**: `linear_algebra_chapters/`
+## 📚 目录结构
 
----
-
-## 📚 章节列表
-
-| 编号 | 文件名 | 章节标题 |
-|------|--------|----------|
-| 00 | `00_零_二次型...md` | **零、二次型** - 为什么所有"弯曲的边界"都能写成 $\mathbf{x}^T A \mathbf{x} = 1$ |
-| 01 | `01_一_先把整张地图摊开.md` | **一、先把整张地图摊开** - 概念总览表 |
-| 02 | `02_二_如果你要重新发明_3DGS...md` | **二、如果你要重新发明 3DGS，会被迫发明哪些数学？** - 问题驱动视角 |
-| 03 | `03_三_向量_它不是数组_它是一根箭头.md` | **三、向量** - 它不是数组，它是一根箭头 |
-| 04 | `04_四_矩阵_它不是表格...md` | **四、矩阵** - 它不是表格，它是"把整个空间一起推一下" |
-| 05 | `05_五_基与坐标_同一根箭头...md` | **五、基与坐标** - 同一根箭头，为什么数字会变 |
-| 06 | `06_六_协方差矩阵...md` | **六、协方差矩阵** - 为什么一个椭球可以被压进 `3x3` 数表里（已优化版） |
-| 07 | `07_七_特征值与特征向量...md` | **七、特征值与特征向量** - 变换最"自然"的方向 |
-| 08 | `08_八_行列式...md` | **八、行列式** - 面积和体积到底被放大了多少 |
-| 09 | `09_九_秩...md` | **九、秩** - 这个变换到底还剩几维信息 |
-| 10 | `10_十_SVD_任意矩阵的_三步拆解_.md` | **十、SVD** - 任意矩阵的"三步拆解" |
-| 11 | `11_十一_现在回到_3DGS...md` | **十一、现在回到 3DGS** - 这些数学到底在代码里干了什么 |
-| 12 | `12_十二_这章最容易混淆的五个点.md` | **十二、这章最容易混淆的五个点** - FAQ |
-| 13 | `13_十三_五个可以直接跑的_Python...md` | **十三、五个可以直接跑的 Python / Matplotlib 实验** - 动手验证 |
-| 14 | `14_十四_最后把整章压成一页卡片.md` | **十四、最后把整章压成一页卡片** - 总结 |
-| 15 | `15_十五_接下来怎么接_3DGS_主线.md` | **十五、接下来怎么接 3DGS 主线** - 学习路径建议 |
-
----
-
-## 🔥 重点章节推荐
-
-### 必读核心（按优先级）：
-
-1. **第 06 章** - 协方差矩阵（已优化版，新增双重身份对照表、FAQ）
-2. **第 04 章** - 矩阵（列视角 vs 行视角的区分非常精彩）
-3. **第 11 章** - 回到 3DGS（把前面所有概念串联起来）
-
-### 学习路径：
-
-```text
-入门 → 第 01 章（总览表）
-    ↓
-基础 → 第 03 章（向量）、第 04 章（矩阵）
-    ↓
-进阶 → 第 05 章（基与坐标）、第 06 章（协方差矩阵）★重点
-    ↓
-深化 → 第 07-10 章（特征值、行列式、秩、SVD）
-    ↓
-实战 → 第 11 章（3DGS 代码应用）
-    ↓
-巩固 → 第 12-15 章（FAQ + 总结 + 实验）
+```
+code/notebooks/
+├── README.md                    # 使用说明和索引
+├── chapter_01_vectors.ipynb     # 第 3 章：向量基础实验
+├── chapter_02_matrices.ipynb    # 第 5 章：矩阵变换可视化
+├── chapter_03_covariance.ipynb  # 第 6 章：协方差与椭球
+├── chapter_04_determinant_rank.ipynb  # 第 7 章：行列式与秩
+├── chapter_05_eigenvalue.ipynb   # 第 8 章：特征值与特征向量
+├── chapter_06_svd.ipynb          # 第 9 章：SVD 三步拆解
+├── chapter_07_lowrank_pca.ipynb  # 第 10 章：低秩近似与 PCA
+├── chapter_08_3dgs_practical.ipynb   # 第 11 章：3DGS 实战应用
+├── chapter_09_common_mistakes.ipynb # 第 12 章：常见误解验证
+└── chapter_10_all_experiments.ipynb   # 第 13 章：5 大实验合集
 ```
 
+## 🚀 快速开始
+
+### 1. 安装依赖
+```bash
+pip install numpy matplotlib jupyter ipywidgets pandas
+```
+
+### 2. 运行 Notebook (两种方式)
+
+#### A. 直接运行 Python 脚本
+```bash
+cd /ntfs_shared/work/git/3dgs_tutorial/linear_algebra_chapters
+python chapter_10_all_experiments.py   # 5大实验合集
+python chapter_08_3dgs_practical.py    # 3DGS实战代码
+```
+
+#### B. 转换为 Jupyter Notebook
+```bash
+cd /ntfs_shared/work/git/3dgs_tutorial/linear_algebra_chapters
+# 方式 1: 直接运行 Python(推荐，无需转换)
+python chapter_06_svd.py
+
+# 方式 2: 转换为.ipynb 后在浏览器中打开
+jupyter nbconvert --to notebook *.py --output-dir ../notebooks_generated/
+cd ../notebooks_generated/
+jupyter notebook
+```
+
+## 📖 每章对应关系
+
+| Notebook | 对应章节 | 核心内容 |
+|----------|---------|---------|
+| `chapter_01_vectors.ipynb` | 第 3-4 章 | 向量运算、基变换、投影可视化 |
+| `chapter_02_matrices.ipynb` | 第 5 章 | 矩阵推网格、缩放/旋转/剪切 |
+| `chapter_03_covariance.ipynb` | 第 6 章 | 协方差椭球、特征分解验证 |
+| `chapter_04_determinant_rank.ipynb` | 第 7 章 | 行列式几何意义、秩与奇异值 |
+| `chapter_05_eigenvalue.ipynb` | 第 8 章 | 特征方向"只缩放不转弯"验证 |
+| `chapter_06_svd.ipynb` | 第 9 章 | SVD三步拆解(Vᵀ→Σ→U)可视化 |
+| `chapter_07_lowrank_pca.ipynb` | 第 10 章 | Eckart-Young定理、图像压缩、PCA=SVD |
+| `chapter_08_3dgs_practical.ipynb` | 第 11 章 | 协方差传播、Jacobian 局部线性化 |
+| `chapter_09_common_mistakes.ipynb` | 第 12 章 | 5 个误解的数值验证 (线性 vs 仿射等) |
+| `chapter_10_all_experiments.ipynb` | 第 13 章 | 全部实验合集 (向量/矩阵/椭圆/特征/SVD) |
+
+## 🔥 推荐学习顺序
+
+1. **先跑实验**:从 `chapter_10_all_experiments.ipynb`开始，感受直观现象
+2. **查缺补漏**:对照章节文档理解背后的数学原理
+3. **深入实战**:运行 `chapter_08_3dgs_practical.ipynb`,连接 3DGS
+
+## 📝 使用说明
+
+每个 Notebook 都包含:
+- ✅ 可运行的 Python/Matplotlib 代码块
+- ✅ 预期输出示例 (以注释形式)
+- ✅ 关键洞察说明 (Markdown 单元格)
+- ✅ 与章节内容的对应关系链接
+
 ---
 
-## 📊 章节内容统计
-
-| 指标 | 数值 |
-|------|------|
-| **总文件数** | 16 个 |
-| **总字数** | ~68KB |
-| **代码示例** | 5+ 个 Python/Matplotlib 实验 |
-| **优化标记** | 第 06 章已添加双重身份对照表、FAQ |
-
----
-
-## 🎯 使用建议
-
-1. **单章精读**：按编号顺序逐个阅读章节文件
-2. **按需查阅**：直接跳转到感兴趣的概念（如协方差矩阵）
-3. **代码验证**：运行第 13 章的 Python 实验加深理解
-4. **复习卡片**：参考第 14 章的一页总结快速回顾
-
----
-
-*最后更新：2026-03-28 (第 06 章节优化完成)*
+**作者**: Ember 🔥  
+**版本**: v1.0 (2026-03-31)
