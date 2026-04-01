@@ -292,7 +292,7 @@ $$
 \nabla \text{loss} = \left[ \frac{\partial \text{loss}}{\partial x}, \frac{\partial \text{loss}}{\partial y}, \frac{\partial \text{loss}}{\partial z} \right]
 $$
 
-```
+
 
 **梯度的几何意义**：损失函数上升最快的方向（梯度下降就是往反方向走）。
 
@@ -334,9 +334,10 @@ $$
 **为什么成立？**（从第一性原理）
 
 假设 `y = f(g(x))`，定义导数为极限：
+
 $$
 f'(u) = \lim_{\Delta u \to 0} \frac{f(u+\Delta u) - f(u)}{\Delta u}
-```
+$$
 
 当 x 变化 Δx 时：
 - g 的变化：Δg ≈ g'(x) · Δx（一阶近似）
@@ -358,7 +359,7 @@ f'(u) = \lim_{\Delta u \to 0} \frac{f(u+\Delta u) - f(u)}{\Delta u}
 
 $$
 \mu_{\text{new}} = \mu - H^{-1} \cdot \nabla \text{loss}
-```
+$$
 
 其中 `H` 是 Hessian 矩阵。听起来很美好——但实际有致命问题：
 
@@ -426,7 +427,7 @@ $$
 
 $$
 \mathcal{N}(x; \mu, \sigma^2) = \frac{1}{\sqrt{2\pi\sigma^2}} \cdot e^{-(x-\mu)^2/(2\sigma^2)}
-```
+$$
 
 **直观理解**：
 - `μ`：峰值位置（中心）
@@ -439,7 +440,6 @@ $$
 $$
 \mathcal{N}(x; \mu, \Sigma) = \frac{1}{\sqrt{(2\pi)^3|\Sigma|}} \cdot e^{-\frac{1}{2}(x-\mu)^T \Sigma^{-1} (x-\mu)}
 $$
-```
 
 **关键变化**：
 - `σ²` → `Σ`（标量方差 → 协方差矩阵）
@@ -467,7 +467,7 @@ $$
 &\quad 2. \int x \cdot p(x) \, dx = \mu      && (\text{固定均值}) \\
 &\quad 3. \int (x-\mu)^2 \cdot p(x) \, dx = \sigma^2 && (\text{固定方差})
 \end{aligned}
-```
+$$
 
 用拉格朗日乘子法求解，得到唯一解：`p(x) ∝ exp(-ax² + bx)` → 就是高斯形式。
 
@@ -523,7 +523,7 @@ C = \sum_{i} (\alpha_i \cdot c_i \cdot \prod_{j<i} (1-\alpha_j))
 3D 高斯在屏幕上的投影是 2D 高素：
 $$
 \alpha(x) = e^{-\frac{1}{2} d^2(x, \mu_{2d})}
-```
+$$
 
 其中 `d²` 是马氏距离。
 
