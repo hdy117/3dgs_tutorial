@@ -290,6 +290,8 @@ loss(μ)
 
 $$
 \nabla \text{loss} = \left[ \frac{\partial \text{loss}}{\partial x}, \frac{\partial \text{loss}}{\partial y}, \frac{\partial \text{loss}}{\partial z} \right]
+$$
+
 ```
 
 **梯度的几何意义**：损失函数上升最快的方向（梯度下降就是往反方向走）。
@@ -436,6 +438,7 @@ $$
 
 $$
 \mathcal{N}(x; \mu, \Sigma) = \frac{1}{\sqrt{(2\pi)^3|\Sigma|}} \cdot e^{-\frac{1}{2}(x-\mu)^T \Sigma^{-1} (x-\mu)}
+$$
 ```
 
 **关键变化**：
