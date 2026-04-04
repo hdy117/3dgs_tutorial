@@ -208,13 +208,13 @@ $$\mathbf{x}^T (A^T A) \mathbf{x} = (A\mathbf{x})^T (A\mathbf{x}) = \|A\mathbf{x
 </details>
 
 **谱定理登场**:
-因为 $A^T A$是对称半正定矩阵，根据**谱定理**,它一定可以分解为:
+因为 $A^T A$是对称半正定矩阵,根据**谱定理**,它一定可以分解为:
 
 $$A^T A = V \Lambda V^T$$
 
-💡 **为什么对称矩阵这么重要?**因为它保证特征值是实数、特征向量是正交的——这给了我们一组"干净的主轴方向"!
+💡 **为什么对称矩阵这么重要?**因为它保证特征值是实数、特征向量是正交的--这给了我们一组"干净的主轴方向"!
 
-> 🧠 **历史背景补充**:谱定理是 19 世纪线性代数的里程碑。柯西 (Cauchy) 在 1829 年证明了实对称矩阵的特征值都是实的，这一结果后来被推广为现代谱定理。没有这个定理，SVD 就不可能存在——因为我们需要保证 $A^TA$有正交特征向量。
+> 🧠 **历史背景补充**:谱定理是 19 世纪线性代数的里程碑。柯西 (Cauchy) 在 1829 年证明了实对称矩阵的特征值都是实的,这一结果后来被推广为现代谱定理。没有这个定理,SVD 就不可能存在--因为我们需要保证 $A^TA$有正交特征向量。
 
 ---
 $$A^T A = V \Lambda V^T$$
@@ -502,7 +502,99 @@ for i in range(len(S)):
 
 ---
 
-### 3. 手动推导 SVD(从$A^T A$开始)
+### 3. 手动推导 SVD（超详细版）
+
+#### **示例矩阵** (简单但非对称):
+
+$$A = \begin{bmatrix} 4 & 2 \\ 1 & 3 \end{bmatrix}$$
+
+---
+
+#### **Step 1: 计算 $A^TA$**
+
+$$\begin{aligned}
+A^T A &= \begin{bmatrix} 4 & 1 \\ 2 & 3 \end{bmatrix} \begin{bmatrix} 4 & 2 \\ 1 & 3 \end{bmatrix} \\
+&= \begin{bmatrix} 16+1 & 8+3 \\ 8+3 & 4+9 \end{bmatrix} \\
+&= \begin{bmatrix} 17 & 11 \\ 11 & 13 \end{bmatrix}
+\end{aligned}$$
+
+✅ **验证对称**: $A^TA = (A^T A)^T$ ✓
+
+---
+
+#### **Step 2: 求特征值 $\lambda_i$**
+
+解特征方程$\det(A^TA - \lambda I) = 0$:
+
+$$\begin{aligned}
+\det\begin{bmatrix} 17-\lambda & 11 \\ 11 & 13-\lambda \end{bmatrix} &= 0 \\
+(17-\lambda)(13-\lambda) - 121 &= 0 \\
+221 - 30\lambda + \lambda^2 - 121 &= 0 \\
+\lambda^2 - 30\lambda + 100 &= 0
+\end{aligned}$$
+
+用求根公式:
+$$\lambda = \frac{30 \pm \sqrt{900-400}}{2} = \frac{30 \pm \sqrt{500}}{2} = \frac{30 \pm 10\sqrt{5}}{2} = 15 \pm 5\sqrt{5}$$
+
+所以:
+$$\lambda_1 = 15 + 5\sqrt{5} \approx 26.18, \quad \lambda_2 = 15 - 5\sqrt{5} \approx 3.82$$
+
+---
+
+#### **Step 3: 计算奇异值 $\sigma_i = \sqrt{\lambda_i}$**
+
+$$\begin{aligned}
+\sigma_1 &= \sqrt{15 + 5\sqrt{5}} \approx 5.12 \\
+\sigma_2 &= \sqrt{15 - 5\sqrt{5}} \approx 1.95
+\end{aligned}$$
+
+✅ **验证**: $\sigma_1 > \sigma_2$ (按降序排列)
+
+---
+
+#### **Step 4: 求特征向量 $\mathbf{v}_i$**
+
+对$\lambda_1 = 15 + 5\sqrt{5}$,解$(A^TA - \lambda_1 I)\mathbf{v} = 0$:
+
+$$\begin{bmatrix} 2-5\sqrt{5} & 11 \\ 11 & -2-5\sqrt{5} \end{bmatrix} \begin{bmatrix} x \\ y \end{bmatrix} = \begin{bmatrix} 0 \\ 0 \end{bmatrix}$$
+
+第一行：$(2-5\sqrt{5})x + 11y = 0$ → $y = \frac{5\sqrt{5}-2}{11} x$
+
+取$x=1$,单位化:
+$$\mathbf{v}_1 = \frac{1}{\sqrt{1+\left(\frac{5\sqrt{5}-2}{11}\right)^2}} \begin{bmatrix} 1 \\ \frac{5\sqrt{5}-2}{11} \end{bmatrix} \approx \begin{bmatrix} 0.736 \\ 0.677 \end{bmatrix}$$
+
+对$\lambda_2 = 15 - 5\sqrt{5}$,类似计算:
+$$\mathbf{v}_2 \approx \begin{bmatrix} -0.677 \\ 0.736 \end{bmatrix}$$
+
+✅ **验证正交**: $\mathbf{v}_1^T \mathbf{v}_2 = 0$ ✓
+
+---
+
+#### **Step 5: 计算 $\mathbf{u}_i = \frac{1}{\sigma_i} A \mathbf{v}_i$**
+
+对$i=1$:
+$$\begin{aligned}
+A\mathbf{v}_1 &\approx \begin{bmatrix} 4 & 2 \\ 1 & 3 \end{bmatrix} \begin{bmatrix} 0.736 \\ 0.677 \end{bmatrix} = \begin{bmatrix} 4.298 \\ 2.767 \end{bmatrix} \\
+\mathbf{u}_1 &= \frac{1}{5.12} \begin{bmatrix} 4.298 \\ 2.767 \end{bmatrix} \approx \begin{bmatrix} 0.839 \\ 0.540 \end{bmatrix}
+\end{aligned}$$
+
+对$i=2$:
+$$\mathbf{u}_2 = \frac{1}{1.95} A \mathbf{v}_2 \approx \begin{bmatrix} -0.540 \\ 0.842 \end{bmatrix}$$
+
+✅ **验证正交**: $\mathbf{u}_1^T \mathbf{u}_2 = -0.839\times0.540 + 0.540\times0.842 \approx 0$ ✓
+
+---
+
+#### **Step 6: 写出完整 SVD**
+
+$$A \approx U \Sigma V^T = \begin{bmatrix} 0.839 & -0.540 \\ 0.540 & 0.842 \end{bmatrix} \begin{bmatrix} 5.12 & 0 \\ 0 & 1.95 \end{bmatrix} \begin{bmatrix} 0.736 & -0.677 \\ 0.677 & 0.736 \end{bmatrix}$$
+
+**验证**:
+$$U\Sigma V^T = \begin{bmatrix} 4.298 & -1.053 \\ 2.767 & 1.637 \end{bmatrix} \begin{bmatrix} 0.736 & -0.677 \\ 0.677 & 0.736 \end{bmatrix} \approx \begin{bmatrix} 4 & 2 \\ 1 & 3 \end{bmatrix} = A$$
+
+✅ **完美匹配**!
+
+---
 
 ```python
 import numpy as np
@@ -663,9 +755,79 @@ SVD 和特征分解的本质区别是什么?为什么 SVD 总是存在?
 
 ---
 
-### ✅ 答案详解:证明 SVD 总是存在
+### ✅ 答案详解：证明 SVD 总是存在（超详细版）
 
 **关键思路**: SVD 通过构造对称矩阵绕过了非方阵的限制。
+
+---
+
+#### 📐 **定理 1: $\mathbf{u}_i$是单位向量**
+
+**已知**: $\|\mathbf{v}_i\|=1$, $\|A\mathbf{v}_i\|=\sigma_i$
+
+$$\begin{aligned}
+\|\mathbf{u}_i\|^2 &= \left\|\frac{1}{\sigma_i} A \mathbf{v}_i\right\|^2 \\
+&= \frac{1}{\sigma_i^2} \|A\mathbf{v}_i\|^2 \\
+&= \frac{1}{\sigma_i^2} \cdot \sigma_i^2 \\
+&= 1
+\end{aligned}$$
+
+✅ **结论**: $\|\mathbf{u}_i\|=1$ (单位长度)
+
+---
+
+#### 📐 **定理 2: $\{\mathbf{u}_i\}$是正交集合**
+
+**已知**: 
+- $A^T A \mathbf{v}_j = \sigma_j^2 \mathbf{v}_j$
+- $\mathbf{v}_i^T \mathbf{v}_j = 0$ (当$i\neq j$)
+
+对$i\neq j$:
+$$\begin{aligned}
+\mathbf{u}_i^T \mathbf{u}_j &= \left(\frac{1}{\sigma_i} A \mathbf{v}_i\right)^T \left(\frac{1}{\sigma_j} A \mathbf{v}_j\right) \\
+&= \frac{1}{\sigma_i\sigma_j} (A\mathbf{v}_i)^T (A\mathbf{v}_j) \\
+&= \frac{1}{\sigma_i\sigma_j} \mathbf{v}_i^T A^T A \mathbf{v}_j \\
+&= \frac{1}{\sigma_i\sigma_j} \mathbf{v}_i^T (\sigma_j^2 \mathbf{v}_j) \\
+&= \frac{\sigma_j^2}{\sigma_i\sigma_j} (\mathbf{v}_i^T \mathbf{v}_j) \\
+&= \frac{\sigma_j}{\sigma_i} \cdot 0 \\
+&= 0
+\end{aligned}$$
+
+✅ **结论**: $\mathbf{u}_i \perp \mathbf{u}_j$ (当$i\neq j$)
+
+---
+
+#### 📐 **定理 3: $U=[\mathbf{u}_1,\ldots,\mathbf{u}_m]$可以扩展成正交矩阵**
+
+**问题**: $A$是$m\times n$,我们只有$r=\text{rank}(A)$个$\mathbf{u}_i$ ($r\leq \min(m,n)$),但需要$m$维正交基!
+
+**解法**: 对$\{\mathbf{u}_1,\ldots,\mathbf{u}_r\}$使用**Gram-Schmidt 正交化**,补充$m-r$个向量，得到完整的正交矩阵 $U$.
+
+---
+
+#### 📐 **定理 4: SVD 公式推导（完整形式）**
+
+假设$r=\text{rank}(A)$,我们写出分块形式：
+
+$$\begin{aligned}
+A V &= A \begin{bmatrix}\mathbf{v}_1 & \cdots & \mathbf{v}_r & \cdots & \mathbf{v}_n\end{bmatrix} \\
+&= \begin{bmatrix}A\mathbf{v}_1 & \cdots & A\mathbf{v}_r & \cdots & A\mathbf{v}_n\end{bmatrix} \\
+&= \begin{bmatrix}\sigma_1\mathbf{u}_1 & \cdots & \sigma_r\mathbf{u}_r & 0 & \cdots & 0\end{bmatrix}
+\quad (\text{因为 }\mathbf{v}_{r+1},\ldots,\mathbf{v}_n\in\text{null}(A))
+\end{aligned}$$
+
+同时:
+$$U \Sigma = \begin{bmatrix}\mathbf{u}_1 & \cdots & \mathbf{u}_m\end{bmatrix} 
+\begin{bmatrix}\sigma_1 & & & \\ & \ddots & & \\ & & \sigma_r & \\
+& & & 0_{(m-r)\times n}\end{bmatrix} = 
+\begin{bmatrix}\sigma_1\mathbf{u}_1 & \cdots & \sigma_r\mathbf{u}_r & 0 & \cdots\end{bmatrix}$$
+
+所以:
+$$A V = U \Sigma \Rightarrow A = U \Sigma V^T$$
+
+✅ **证毕**!
+
+---
 
 #### Step 1: 考虑 $A^TA$
 
