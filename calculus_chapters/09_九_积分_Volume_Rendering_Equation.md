@@ -118,7 +118,7 @@ $$\boxed{\frac{\partial T(t)}{\partial \sigma(t')} = -T(t) \cdot 1 = -T(t)}$$
 (a) 如果场景中没有遮挡（全透明），$T(t)$ 应该等于多少？
 (b) 如果前面有一个完全不透明的物体，光线能到达 $t$ 点吗？此时 $T(t)$ 是多少？
 
-<details>
+<details open>
 <summary>✅ 参考答案</summary>
 (a) $\sigma = 0 \implies T = e^0 = 1$（光全部通过）。  
 (b) 前面挡住了 → $T = 0$。此时该点颜色的贡献为 0，这正是 Alpha blending 中“被遮挡”的数学描述。
@@ -133,7 +133,7 @@ $$\boxed{\frac{\partial T(t)}{\partial \sigma(t')} = -T(t) \cdot 1 = -T(t)}$$
 (a) 写出这一段对颜色的贡献 $dC$。
 (b) 为什么 $T_{i+1} = T_i (1 - \alpha_i)$？（提示：从透射率定义出发）
 
-<details>
+<details open>
 <summary>✅ 参考答案</summary>
 (a) 每一段的贡献近似为 $T_i \cdot (\sigma_i \delta_i) \cdot c_i$。  
 (b) 透射率是“未被遮挡的概率”。如果第 $i$ 段遮挡了 $\alpha_i = \sigma_i \delta_i$ 的比例，那么幸存的透射率就是原来的 $(1-\alpha_i)$ 倍。
@@ -151,7 +151,7 @@ transmittance = torch.cumprod(torch.cat([torch.ones(..., device), (1 - alphas)[:
 ```
 这行代码是在计算 $T_i$（透射率）。思考：如果 $\alpha$ 值接近 1，`cumprod` 运算会不会导致梯度消失？
 
-<details>
+<details open>
 <summary>✅ 参考答案</summary>
 是的。因为 $T = \prod (1-\alpha)$，如果很多高斯都很不透明，$T$ 会指数级衰减趋近于 0。此时链式法则乘积项极小，导致后面的梯度传不过来（Gradient Vanishing）。这也是为什么 3DGS 需要 careful opacity initialization 的原因。
 </details>

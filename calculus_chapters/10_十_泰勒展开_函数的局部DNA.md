@@ -92,7 +92,7 @@ $$L(\theta) \approx L(\theta_0) + \underbrace{g^T\Delta\theta}_{一阶(线性)} 
 (a) 写出前三项（直到 $x^5$）。
 (b) 当 $x=0.1$ (弧度) 时，为什么我们可以近似认为 $\sin(0.1) \approx 0.1 - \frac{0.1^3}{6}$？误差大约是多少量级？
 
-<details>
+<details open>
 <summary>✅ 参考答案</summary>
 (a) $0 + x - 0 + \frac{x^3}{6} - 0 - \frac{x^5}{120} = x - \frac{x^3}{6} + \frac{x^5}{120}$  
 (b) 因为 $x=0.1$，二次项是 $0$ (偶数次导数为0)，三次项 $0.1^3/6 \approx 0.00017$。误差在万分之一级别！这就是为什么微积分里说“无穷小量下 $\sin x \approx x$”。
@@ -104,7 +104,7 @@ $$L(\theta) \approx L(\theta_0) + \underbrace{g^T\Delta\theta}_{一阶(线性)} 
 (a) 设 $f(x) = \sqrt{x}$，求它在 $x=4$ 处的一阶泰勒展开（切线方程）。
 (b) 用这个近似值估算 $\sqrt{4.1}$。实际计算器结果是多少？误差多大？
 
-<details>
+<details open>
 <summary>✅ 参考答案</summary>
 (a) $f'(x) = \frac{1}{2\sqrt{x}}$。在 $x=4$: $f(4)=2, f'(4)=0.25$。切线方程: $L(x) = 2 + 0.25(x-4)$。
 (b) $\sqrt{4.1} \approx 2 + 0.25(0.1) = 2.025$。实际值 ≈ 2.02484... 误差极小！这就是为什么在 Ch04 中我们说只要凑得够近，曲线就是直线。
@@ -118,7 +118,7 @@ $$L(\theta) \approx L(\theta_0) + \underbrace{g^T\Delta\theta}_{一阶(线性)} 
 假设有一个函数 $f(x)$ 可以用多项式表示：$P(x) = \sum a_n x^n$。
 证明：系数 $a_n$ 必须是 $\frac{f^{(n)}(0)}{n!}$。（提示：对等式两边同时求 $n$ 次导，然后令 $x=0$）。
 
-<details>
+<details open>
 <summary>✅ 参考答案</summary>
 1. 求一次导：$P'(x) = a_1 + 2a_2x + \dots$。在 $x=0$ 时，只有第一项非零 $\implies f'(0)=a_1$。
 2. 求两次导：$P''(x) = 2a_2 + 6a_3x + \dots$。在 $x=0$ 时，只有第一项非零 $\implies f''(0)=2a_2$。
@@ -131,7 +131,7 @@ $$L(\theta) \approx L(\theta_0) + \underbrace{g^T\Delta\theta}_{一阶(线性)} 
 (a) 如果我们只用前两项近似：$f(x_0 + \Delta x) \approx f(x_0) + f'(x_0)\Delta x = 0$，解出 $\Delta x$。
 (b) 这就是求解方程 $f(x)=0$ 的牛顿迭代公式！为什么它比简单的二分法收敛得快得多？
 
-<details>
+<details open>
 <summary>✅ 参考答案</summary>
 (a) $\Delta x = -\frac{f(x_0)}{f'(x_0)} \implies x_{new} = x_0 - \frac{f(x_0)}{f'(x_0)}$。
 (b) 因为它利用了二阶信息（曲率/加速度），每一步都精准地跳到抛物线谷底，而不是盲目摸索。这叫“二次收敛”。
