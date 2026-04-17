@@ -66,14 +66,38 @@ $$C(r) \approx \sum_{i=1}^N T_i \cdot (1 - e^{-\sigma_i \delta_i}) \cdot c_i$$
 
 ## 🔥 Part 2: 微积分基本定理在 3DGS 中的体现
 
-### 为什么 VRE 是可微分的？
+## 🔥 Part 2: 严格推导 — VRE 中 $\partial T / \partial \sigma = -T$ 的来源 (Ch09)
 
-因为 $T(t)$ 本身就是一个积分形式：
-$$T(t) = \exp\left(-\int_0^t \sigma(s) ds\right)$$
+原文直接给出结论，但这是连接连续物理与离散代码的关键。我们用**微积分基本定理**补齐推导。
 
-当我们对 $\sigma$（密度）求导时，根据链式法则和微积分基本定理：
-$$\frac{\partial T}{\partial \sigma(t)} = -T(t)$$
-**这太优雅了！** 透射率对密度的导数仅仅是它自己的相反数。这意味着在反向传播时，梯度的计算极其高效且数值稳定。
+### 证明目标
+已知透射率定义：$T(t) = \exp\left(-\int_0^t \sigma(s)\,ds\right)$。
+证明对任意采样点 $t'$（假设 $t' < t$）：
+$$\frac{\partial T(t)}{\partial \sigma(t')} = -T(t)$$
+
+### 证明过程
+
+**Step 1 — 引入中间变量**
+令积分项为 $S(t)$：
+$$S(t) = \int_0^t \sigma(s)\,ds$$
+则透射率可写为复合函数形式：$T(t) = e^{-S(t)}$。
+
+**Step 2 — 链式法则分解**
+根据多元微分链式法则：
+$$\frac{\partial T}{\partial \sigma(t')} = \frac{dT}{dS} \cdot \frac{\partial S}{\partial \sigma(t')}$$
+
+第一项（外层导数）：
+$$\frac{dT}{dS} = \frac{d}{dS}(e^{-S}) = -e^{-S} = -T$$
+
+第二项（内层积分对密度的导数）：
+由微积分基本定理，$\frac{\partial}{\partial \sigma(t')}\int_0^t \sigma(s)\,ds$ 表示当 $t'$ 在积分区间内时，该点对总积分面积的贡献。显然为 **1**（即 $\delta$ 函数的性质）。
+*(若 $t' > t$，则导数为 0)*
+
+**Step 3 — 合并结果 (当 $t' < t$ 时)**：
+$$\boxed{\frac{\partial T(t)}{\partial \sigma(t')} = -T(t) \cdot 1 = -T(t)}$$
+
+### ✅ 对反向传播的工程意义
+在 Ch08 的梯度追踪中，从 Loss 回传到 $\sigma$ 时，透射率部分的导数就是 $-T$ — **一个已经在前向计算中算好的值**。这使得 VRE 的反向传播极其高效（不需要重新求积分）。∎
 
 ---
 
