@@ -157,3 +157,168 @@ Projected α ← [exp(-‖x-μ‖² / 2σ²) * opacity_source]
 **🔥 Ember's Note**: 恭喜！你现在已经掌握了 3DGS 优化的数学灵魂。  
 → **建议**：尝试在 PyTorch 里手动写一个简单的 `backward()`，你会对 Autograd 有更深的敬畏。
 </div>
+
+---
+
+## 🧠 深度练习 (Deep Practice)
+
+### 1.Loss to Gradient Flow
+**问题**: 画出从 `Loss` 到 `Gaussian.mu_x` 的完整依赖关系图。
+
+💡 **Hint**: Loss $	o$ Pixel Color $	o$ Alpha Blending $	o$ Projected Gaussian. 
+
+✅ **Answer**: 这是理解 `loss.backward()` 到底在算什么的路线图。
+
+---
+### 2.Gradient Sparsity
+**问题**: 为什么训练初期很多高斯参数的梯度是 0（Sparse）？
+
+💡 **Hint**: Out-of-view：不在相机视锥内，不参与渲染。
+
+✅ **Answer**: 这些高斯不贡献像素颜色，所以 Loss 对它们的偏导数是 0。优化器只会更新那些“被看到”的高斯。
+
+---
+### 3.Gradient Vanishing in VRE
+**问题**: 如果 $T(t)$（透射率）非常小，会对 $rac{\partial L}{\partial \sigma}$ 产生什么影响？
+
+💡 **Hint**: 梯度消失。
+
+✅ **Answer**: 因为反向传播公式中包含因子 $T(t)$。前面的高斯把光全挡住了，后面的密度参数就无法通过 Loss 信号进行训练。
+
+---
+### 4.Autograd Code Trace
+**问题**: 在 PyTorch 代码中，调用 `loss.backward()` 后如何查看某个参数的具体梯度值？
+
+💡 **Hint**: 使用 `.grad` 属性：例如 `mu_x.grad`. 
+
+✅ **Answer**: `requires_grad=True` 的 tensor 会自动追踪计算图，并在反向传播结束后存储导数值。
+
+---
+### 5.Alpha Blending Backward
+**问题**: 为什么 Alpha blending 的反向传播需要依赖前向时的 $lpha$ 和 $T(t)$？
+
+💡 **Hint**: 导数公式中包含这些项（如 $(1-lpha_{prev})$）。
+
+✅ **Answer**: 反向函数不是独立的，它必须读取 `forward` 时记录的状态才能算出当前步的精确梯度。
+
+---
+### 6.Optimization Step
+**问题**: 写出一次完整的 3DGS 参数更新步骤（伪代码）。
+
+💡 **Hint**: `optimizer.step()`. 
+
+✅ **Answer**: 1. 前向渲染得到 Loss; 2. `loss.backward()` 计算梯度; 3. 优化器根据梯度和学习率更新所有参数。
+
+---
+### 7.Gradient Clipping in 3DGS
+**问题**: 为什么官方代码中使用了 `clip_grad_norm_`？
+
+💡 **Hint**: 防止爆炸 (Exploding Gradients). 
+
+✅ **Answer**: 初始阶段 Loss 巨大，导致梯度值可能达到数千甚至数万。裁剪能强制步长保持在安全范围内（如 0.01）。
+
+---
+### 8.Parameter Initialization
+**问题**: Gaussian 的初始化对链式法则有什么影响？
+
+💡 **Hint**: 决定梯度的初始方向和大小。
+
+✅ **Answer**: 如果初始化得太远或方向错误，模型可能一开始就陷入次优的局部极小值（例如全透明或全不透明）。
+
+---
+### 9.Learning Rate Scheduling
+**问题**: 为什么在 3DGS 训练中，学习率通常需要从大到小（Decay）？
+
+💡 **Hint**: 前期快速收敛，后期精细微调。
+
+✅ **Answer**: 开始时 Loss 表面陡峭，需要大步长；接近最优解时表面平坦，需要小步长以避免“过冲”震荡。
+
+---
+### 10.Jacobian in Rendering
+**问题**: 投影矩阵的导数在反向传播中起到了什么作用？
+
+💡 **Hint**: 将 2D 像素空间的梯度映射回 3D 空间。
+
+✅ **Answer**: 它是链式法则中的一环，告诉模型：“如果我在 2D 图像上向右移动一个像素，对应的 3D 高斯应该往哪移”。
+
+---
+### 11.Hessian Approximation
+**问题**: 为什么 Adam 优化器可以被视为一种“自适应”的牛顿法？
+
+💡 **Hint**: 利用二阶矩估计对角 Hessian. 
+
+✅ **Answer**: Adam 用历史梯度的平方和来近似曲率。梯度大的方向自动减速，梯度小的方向加速，模拟了利用曲率信息的效果。
+
+---
+### 12.Numerical Stability in Code
+**问题**: 在代码中计算 $\log(1-lpha)$ 时如何避免数值问题？
+
+💡 **Hint**: 使用 `torch.log1p(-alpha)`. 
+
+✅ **Answer**: 直接计算 $1-lpha$（当 $lpha 	o 1$）会丢失精度（下溢）。`log1p` 是专门针对此场景优化的数学函数。
+
+---
+### 13.Backward Path Debugging
+**问题**: 如果发现某个高斯的梯度始终是 0，可能的原因有哪些？
+
+💡 **Hint**: 视锥裁剪 (Frustum Culling) 或透明度为 0. 
+
+✅ **Answer**: 不在相机范围内；或者初始化时 opacity 太低被其他物体挡住了（梯度消失）。
+
+---
+### 14.Gradient Descent in N-Dims
+**问题**: 在几千万维的空间里做梯度下降，计算机如何保证找到方向？
+
+💡 **Hint**: 逐元素计算偏导数。
+
+✅ **Answer**: 虽然维度极高，但现代框架（如 PyTorch）可以并行处理这些计算。每个参数的更新只依赖于该点的局部信息。
+
+---
+### 15.Alpha Blending Complexity
+**问题**: 为什么 Alpha blending 的求导公式中包含乘积项 $c_i \prod (1-lpha_j)$？
+
+💡 **Hint**: 物理遮挡的累积效应。
+
+✅ **Answer**: 第 $i$ 个高斯的颜色只有在前面所有物体都不透明（透射率为 0）时才会完全显现。
+
+---
+### 16.Loss Landscape
+**问题**: 3DGS 的 Loss 表面通常被认为是凸函数吗？
+
+💡 **Hint**: 不是，是非凸的 (Non-convex). 
+
+✅ **Answer**: 因为投影和 Alpha blending 包含复杂的非线性操作。模型容易陷入局部最优（Local Optima）。
+
+---
+### 17.Stochastic Gradient Descent
+**问题**: 在 3DGS 中，为什么使用全量图像计算 Loss 而不是逐像素？
+
+💡 **Hint**: 显存限制与收敛稳定性. 
+
+✅ **Answer**: 虽然理论上可以逐像素训练，但全图 Batch 能提供更有力的全局梯度信号，减少震荡。
+
+---
+### 18.Chain Rule in SH Coefficients
+**问题**: 球谐函数 (SH) 系数的梯度是如何计算的？
+
+💡 **Hint**: 通过链式法则：$rac{\partial L}{\partial c_{SH}} = rac{\partial L}{\partial C} \cdot rac{\partial C}{\partial c_{view}}$. 
+
+✅ **Answer**: 颜色最终是视角的函数。反向传播会算出每个 SH 系数对最终像素颜色的“贡献敏感度”。
+
+---
+### 19.Gradient Normalization
+**问题**: 为什么不同参数的梯度量级（Scale）可能完全不同？
+
+💡 **Hint**: $\mu$ (坐标) vs $lpha$ (0-1). 
+
+✅ **Answer**: 位置参数可能有几十米的大小，而透明度只有小数。这导致直接更新时步长难以统一平衡。
+
+---
+### 20.Optimization Goal Check
+**问题**: 如何判断 3DGS 训练已经收敛了？看 PSNR 还是梯度？
+
+💡 **Hint**: 两者结合. 
+
+✅ **Answer**: PSNR 趋于稳定（不再显著上升）且梯度范数接近零，说明模型已到达极值点附近。
+
+---

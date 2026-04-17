@@ -166,3 +166,169 @@ transmittance = torch.cumprod(torch.cat([torch.ones(..., device), (1 - alphas)[:
 **🔥 Ember's Note**: 积分 = "无穷小量的累积"。  
 → **建议**：理解 VRE 公式中 $T(t)$ 的指数形式，这是连接物理与代码的桥梁。
 </div>
+
+---
+
+## 🧠 深度练习 (Deep Practice)
+
+### 1.VRE Physical Meaning
+**问题**: 为什么 Volume Rendering Equation 本质上是一个积分？
+
+💡 **Hint**: 累积效应. 
+
+✅ **Answer**: 因为光线穿过介质时，沿途每一个点的颜色和密度都会“叠加”进最终看到的图像中。
+
+---
+### 2.Transmittance Derivation
+**问题**: 推导 $T(t) = e^{-\int_0^t \sigma(s)ds}$ 对 $\sigma(t)$ 的导数为什么是 $-T(t)$？
+
+💡 **Hint**: 微积分基本定理 + 链式法则. 
+
+✅ **Answer**: 外层 $e^{-x} 	o -e^{-x}$, 内层积分求导为 1。结果是 $-T(t)$，这保证了反向传播的高效性。
+
+---
+### 3.Numerical Integration Error
+**问题**: 将连续的 VRE 离散化为求和公式时，会引入什么误差？
+
+💡 **Hint**: 采样率不足导致的截断误差. 
+
+✅ **Answer**: 如果高斯太密集或距离太远而没被正确采样，就会发生漏光（Artifacts）或边缘模糊。
+
+---
+### 4.Riemann Sum to Integral
+**问题**: 黎曼和是如何逼近连续积分的？令 $N 	o \infty$. 
+
+💡 **Hint**: $\sum f(x_i)\Delta x 	o \int f(x)dx$. 
+
+✅ **Answer**: 当采样段数趋向无穷大时，离散的矩形求和就变成了精确的面积（累积颜色）。
+
+---
+### 5.Alpha vs Density
+**问题**: 离散公式中的 $lpha$ 和连续公式中的 $\sigma$ 是怎么转换的？
+
+💡 **Hint**: $lpha = 1 - e^{-\sigma \delta}$. 
+
+✅ **Answer**: 这是体积密度到几何不透明度的映射。当 $\delta$（厚度）很小时，$lpha pprox \sigma \delta$. 
+
+---
+### 6.Ordering Necessity
+**问题**: 为什么在离散 VRE 中必须按深度排序？
+
+💡 **Hint**: 物理遮挡关系是累积的. 
+
+✅ **Answer**: 如果顺序乱了，后面的物体就会错误地覆盖前面的物体。正确的排序保证了 $T_i = \prod (1-lpha_j)$ 的有效性。
+
+---
+### 7.Transmittance Zero
+**问题**: 如果场景中有完全不透明的墙壁 ($lpha=1$)，会发生什么？
+
+💡 **Hint**: 透射率归零，梯度消失. 
+
+✅ **Answer**: 光线无法穿透墙壁，导致墙后所有物体的 Loss 和梯度都为 0（被完全遮挡）。
+
+---
+### 8.Gradient Clipping in VRE
+**问题**: 为什么 $T(t)$ 的指数形式会导致数值不稳定性？
+
+💡 **Hint**: 下溢 (Underflow) 到 0. 
+
+✅ **Answer**: 当累积密度极大时，$e^{-large}$ 会变成浮点数的极限值 0。此时梯度计算会失效。
+
+---
+### 9.Hessian of Integral
+**问题**: 积分函数的 Hessian（二阶导数）描述了 Loss 表面的什么？
+
+💡 **Hint**: 曲率/弯曲程度. 
+
+✅ **Answer**: 它告诉我们梯度下降的步长应该放多大：如果曲率很大（很陡），必须减小步长；平缓则可以加大。
+
+---
+### 10.Fourier vs Laplace
+**问题**: 在信号处理中，积分对应傅里叶变换中的什么操作？
+
+💡 **Hint**: 内积/匹配求和. 
+
+✅ **Answer**: 傅里叶变换本质上就是对信号在不同频率的正弦波上做的“加权和（积分）”，提取特定成分的强度。
+
+---
+### 11.Numerical Stability Fix
+**问题**: 如何解决 $T(t)$ 下溢导致的梯度消失问题？
+
+💡 **Hint**: 使用 $\log(1-lpha)$ 等稳定计算形式. 
+
+✅ **Answer**: 或者在初始化时确保高斯足够透明，避免一开始就出现全黑遮挡的情况。
+
+---
+### 12.VRE to Alpha Blending
+**问题**: 当光线只经过两个物体时，VRE 积分公式简化为哪样？
+
+💡 **Hint**: $C = c_1lpha_1 + c_2(1-lpha_1)lpha_2$. 
+
+✅ **Answer**: 这就是单层/双层 Alpha blending 的数学起源。
+
+---
+### 13.Accumulation Meaning
+**问题**: 为什么我们说积分是“无穷小量的求和”？
+
+💡 **Hint**: 黎曼和的定义. 
+
+✅ **Answer**: 它把无限细长的切片（$dt 	o 0$）的面积加起来，得到总量。在 VRE 中，这是颜色的无限叠加。
+
+---
+### 14.Loss Integration
+**问题**: L2 Loss (MSE) 本质上也是一种积分吗？
+
+💡 **Hint**: 是，像素误差的积分 $ \int (pred-target)^2 dx $. 
+
+✅ **Answer**: 只不过在离散图像上被近似为了有限个像素点的求和 $\sum$. 
+
+---
+### 15.Regularization Integral
+**问题**: Total Variation (TV) 正则化是如何利用积分工作的？
+
+💡 **Hint**: 对梯度的范数做积分，防止噪声. 
+
+✅ **Answer**: $\int |
+abla f| dx$。它惩罚了图像中剧烈的梯度变化（噪点），让结果更平滑。
+
+---
+### 16.VRE Backward Path
+**问题**: 在反向传播时，如何计算 Loss 对 $\sigma_i$（第 i 个高斯密度）的梯度？
+
+💡 **Hint**: $rac{\partial L}{\partial \sigma_i} = rac{\partial L}{\partial C} \cdot c_i \cdot T_{i+1}$. 
+
+✅ **Answer**: 注意这里出现了一个 $T_{i+1}$：它代表了该高斯后面所有物体的透射率（即该高斯的“有效贡献度”）。
+
+---
+### 17.Numerical Integration Rule
+**问题**: 除了黎曼和，还有什么更精确的数值积分方法？
+
+💡 **Hint**: 梯形公式 (Trapezoidal rule) 或 Simpson's rule. 
+
+✅ **Answer**: 它们用直线或抛物线代替矩形，能在相同的采样数下提供更小的截断误差。
+
+---
+### 18.Gradient Vanishing Logic
+**问题**: 为什么 $T(t)$ 是连乘项会导致梯度消失？
+
+💡 **Hint**: $T = \prod (1-lpha_j)$. 
+
+✅ **Answer**: 如果有很多个不透明的高斯叠加，$(1-lpha)^N$ 会指数级衰减到 0。链式法则的乘积项极小，导致信号中断。
+
+---
+### 19.Volume Rendering Application
+**问题**: 除了 3DGS，哪些其他领域使用了类似的体积渲染方程？
+
+💡 **Hint**: NeRF (神经辐射场), 医疗 CT 重建, 烟雾模拟. 
+
+✅ **Answer**: 任何需要处理半透明介质、光线累积效应的物理仿真都会用到 VRE。
+
+---
+### 20.Calculus in Rendering
+**问题**: 微积分基本定理在渲染管线中的核心意义是什么？
+
+💡 **Hint**: 连接了微分（导数）与积分（累加）. 
+
+✅ **Answer**: 它证明了即使 Loss 是复杂的累加结果，其梯度依然存在且可计算（只要每一步都可微）。
+
+---
