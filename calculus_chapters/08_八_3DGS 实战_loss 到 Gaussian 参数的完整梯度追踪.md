@@ -111,8 +111,6 @@ print(f"dL/d(color_c): {color_c.grad}") # -0.5
 *   Pixel Color → Alpha Blending (涉及 α, c)
 *   Alpha Blending → Projected Gaussian (涉及 μ, Σ)
 
-<details open>
-<summary>✅ 参考答案</summary>
 Loss → [∂L/∂Pixel] 
        ↓ 
 Pixel Color ← [α₁c₁ + α₂c₂(1-α₁)] 
@@ -120,7 +118,6 @@ Pixel Color ← [α₁c₁ + α₂c₂(1-α₁)]
 Projected α ← [exp(-‖x-μ‖² / 2σ²) * opacity_source] 
        ↓ 
 3D Gaussian Parameters (μ, Σ)
-</details>
 
 ---
 
@@ -131,11 +128,8 @@ Projected α ← [exp(-‖x-μ‖² / 2σ²) * opacity_source]
 (a) 根据 Ch09，如果 $T(t)$ （透射率）非常小，会对 $\frac{\partial L}{\partial \sigma}$ 产生什么影响？
 (b) 在代码中如何缓解这个问题？（提示：考虑数值稳定性或权重初始化）
 
-<details open>
-<summary>✅ 参考答案</summary>
 (a) 根据微积分基本定理推导，梯度中包含 $T(t)$。如果前面有高斯挡住了光，$T \approx 0$，导致后面高斯的梯度也接近 0（梯度消失），模型无法训练后面的参数。
 (b) 使用合理的 opacity 初始化值；或者在渲染时引入 "near clipping plane" 避免过远的噪声参与计算。
-</details>
 
 ---
 
