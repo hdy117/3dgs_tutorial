@@ -83,6 +83,64 @@ $$L(\theta) \approx L(\theta_0) + \underbrace{g^T\Delta\theta}_{一阶(线性)} 
 
 ---
 
+## 🔥 Part 4: 从单变量到超空间 —— Hessian 矩阵的诞生 🌐
+
+在 Ch05 中，我们处理的是多维空间的梯度 $\nabla f$。但当你站在多维空间中想要“看清地形弯曲程度”时，一阶导数就不够了——你需要**二阶导数**。这就是为什么深度学习优化器（如牛顿法、Adam）需要了解 Loss 曲面的“碗状程度”。
+
+### 🔍 Step 1: 引入多维扰动 $\Delta\theta$
+假设参数空间有 $N$ 维：$\theta = [\theta_1, \theta_2, \dots, \theta_N]^T$。如果我们想预测从点 $\theta_0$ 移动一小步 $\Delta\theta$ 后的函数值变化，一阶泰勒展开变为向量形式：
+$$f(\theta_0 + \Delta\theta) \approx f(\theta_0) + \nabla f(\theta_0)^T \cdot \Delta\theta$$
+
+### 🔍 Step 2: 引入二阶项 —— Hessian 矩阵
+如果步子稍大（或者 Loss 表面极度弯曲），我们必须加上二次修正项。数学家发现，这个修正项可以用一个 $N \times N$ 的矩阵完美表达：
+$$f(\theta_0 + \Delta\theta) \approx f(\theta_0) + \underbrace{g^T \Delta\theta}_{一阶(梯度方向)} + \frac{1}{2} \underbrace{\Delta\theta^T H \Delta\theta}_{二阶(曲率修正)}$$
+
+其中 $H$ 就是 **Hessian Matrix（海森矩阵）**，它的每一个元素是：
+$$H_{ij} = \frac{\partial^2 f}{\partial \theta_i \partial \theta_j}$$
+
+**关键直觉**：
+*   一阶项 $\nabla f^T \Delta\theta$ 告诉你“坡度有多陡、往哪走”。
+*   二阶项 $\Delta\theta^T H \Delta\theta$ 告诉你“碗底有多深、弯曲得有多厉害”。
+
+### 🔍 Step 3: 为什么 $H$ 是对称的？（Schwarz 定理）
+对于绝大多数光滑物理系统，求导顺序不影响结果：
+$$\frac{\partial^2 f}{\partial \theta_i \partial \theta_j} = \frac{\partial^2 f}{\partial \theta_j \partial \theta_i} \quad \implies H_{ij} = H_{ji}$$
+这意味着 $H$ 是一个对称矩阵。在数学上，对称矩阵一定可以被对角化，它的特征值 $\lambda_1, \dots, \lambda_N$ 直接告诉我们 Loss 曲面在各个主方向上的**弯曲程度（曲率）**！
+
+---
+
+## 🐍 PyTorch 实战：用 autograd 计算 Hessian-vector product (HVP) 🔥
+
+在真正的深度学习中，显式构造 $N \times N$ 的 Hessian 矩阵对于百万级参数来说是不可承受之重。PyTorch 提供了一个天才的技巧：**不需要算出整个矩阵，只需要算出“矩阵与向量的乘积”**！这就是 `torch.autograd.functional.hvp`。
+
+```python
+import torch
+from torch.autograd.functional import hvp
+
+# 模拟一个二维 Loss 曲面：L = 2x^2 + 3y^2 (碗状)
+theta = torch.tensor([1.0, 1.0], requires_grad=True)
+loss = 2 * theta[0]**2 + 3 * theta[1]**2
+
+print(f"当前 Loss: {loss.item()}") # 5.0
+print(f"梯度 (一阶): {torch.autograd.grad(loss, theta)[0]}") # [4.0, 6.0] -> ∇L = [4x, 6y]
+
+# 🔥 Hessian-vector product: v^T H @ v
+# 假设我们沿着对角线方向走，取向量 v = [1.0, 1.0]
+v = torch.tensor([1.0, 1.0], requires_grad=True)
+hvp_val, _ = hvp(loss, theta, v)
+
+print(f"H @ v (二阶曲率投影): {hvp_val}") 
+# 对于 L=2x^2+3y^2，H = [[4, 0], [0, 6]]。H@[1,1] = [4, 6]。完全匹配！
+
+# ✅ 应用：牛顿法步长修正
+# 梯度下降: theta -= eta * grad
+# 牛顿法: theta -= eta * (H^{-1} @ grad) -> HVP 是求解牛顿方向的基础
+```
+
+**工程意义**：这就是 Adam/Optimizer 里“自适应学习率”的底层数学逻辑——通过二阶导数（曲率）自动调整每个维度的步长。曲率大的地方自动减速，曲率小的地方加速。
+
+---
+
 ## 📚 习题
 
 ### ✅ 基础题（必做）
