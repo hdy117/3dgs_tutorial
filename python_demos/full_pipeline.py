@@ -646,7 +646,7 @@ def main():
         'final_losses': losses,
         'camera_pose': camera.t_w2c.squeeze(-1).detach().cpu(),
         'image_size': (512, 512),
-    }, '/home/dhu/shared/work/git/3dgs_tutorial/python_demos/demo_state.pt')
+    }, '/mnt/disk_e/work/git/3dgs_tutorial/python_demos/demo_state.pt')
 
     print(f"\n[DONE] Demo state saved → python_demos/demo_state.pt")
     print("To visualize: load with torch.load() and render more views.")

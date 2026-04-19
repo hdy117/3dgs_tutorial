@@ -405,7 +405,7 @@ def visualize_image(image: torch.Tensor, title: str = "Rendered Image"):
     ax.set_title(title, fontsize=14)
     ax.axis('off')
     plt.tight_layout()
-    plt.savefig('/home/dhu/shared/work/git/3dgs_tutorial/python_demos/render_output.png', dpi=150, bbox_inches='tight')
+    plt.savefig('/mnt/disk_e/work/git/3dgs_tutorial/python_demos/render_output.png', dpi=150, bbox_inches='tight')
     print(f"[Saved] render_output.png")
     plt.show(block=False)
 
@@ -465,7 +465,7 @@ def main():
         'rotation': gaussians.rotation.detach().cpu(),
         'opacity': gaussians.opacity.detach().cpu(),
         'colors_sh0': gaussians.colors_sh0.detach().cpu(),
-    }, '/home/dhu/shared/work/git/3dgs_tutorial/python_demos/scene_state.pt')
+    }, '/mnt/disk_e/work/git/3dgs_tutorial/python_demos/scene_state.pt')
     
     print(f"\n[DONE] Scene saved → python_demos/scene_state.pt")
     print("  (Load in train_demo.py for training)")
