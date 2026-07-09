@@ -1,35 +1,32 @@
 # 第 10 章：场景一旦动起来，静态 3DGS 的哪一部分先失效——4D Gaussian 到底在扩展什么
 
-**本章核心问题**：前面几章已经把静态 3DGS 的主线解释清楚了。现在问题变成：
+**本章核心问题**：静态 3D Gaussian Splatting（3DGS）主线已经清楚。现在问题变成：
 
-> 如果场景本身会随时间变化，那么第 4 章那条 Gaussian -> projection -> sorting -> blending 的渲染链，哪些部分仍然成立，哪些部分必须被改写？4D Gaussian Splatting 到底是在“加一个时间维”，还是在做更深的表示扩展？
+> 如果场景本身会随时间变化，那么第 4 章那条 `Gaussian → projection → sorting → blending` 的渲染链，哪些部分仍然成立，哪些部分必须被改写？4D Gaussian Splatting（常称 4DGS / dynamic Gaussian）到底是在“加一个时间维”，还是在做更深的表示扩展？它是不是一套全新的 renderer？
 
 如果前面几章回答的是：
 
-- 第 3 章：为什么 primitive 选 Gaussian
-- 第 4 章：Gaussian 怎样被渲染成图
-- 第 5 章：训练目标为什么这样设计
-- 第 6 章：第一批 Gaussian 从哪来
-- 第 7 章：静态场景怎样被训练到收敛
-- 第 8 章：静态推理为什么还要做优化
-- 第 9 章：如果自己实现，应该按什么顺序落代码
+- 第 3–4 章：表示与渲染  
+- 第 5–7 章：目标、初始化与训练闭环  
+- 第 8 章：推理为何还要优化  
+- 第 9 章：如何按层实现与验证  
 
 那么这一章回答的就是：
 
 ```text
 如果场景开始动起来
 静态 3DGS 为什么不够了
-以及应该怎样把静态高斯系统扩展成时间相关的表示
+以及应该怎样把静态高斯系统扩展成时间相关表示
 ```
 
-先把主线写在前面：
+先把主线钉死：
 
 ```text
-4DGS 的关键不是重新发明一套渲染器
-而是把静态高斯参数改成时间函数
+4DGS 的关键不是重新发明一套渲染器 [renderer]
+而是把静态高斯参数改成时间函数 Theta(t)
 
-canonical Gaussian 集合给你一个静态基底
-时间条件形变场告诉你它在每个时刻怎样偏移、拉伸或改变外观
+canonical Gaussian 集合给你一个静态基底 [canonical space]
+时间条件形变场 [deformation field] 告诉你它在每个时刻怎样偏移、拉伸或改变外观
 
 到了每一个具体时刻 t
 你仍然是在跑同一条 projection / sorting / blending 链
@@ -42,33 +39,418 @@ canonical Gaussian 集合给你一个静态基底
 
 ---
 
-## 一、先分清：动态场景到底让静态 3DGS 的哪一条假设失效了
+## 阶段 1 — 定界问题 [problem framing]
 
-静态 3DGS 之所以成立，背后有一个默认假设：
+### 1.1 成功标准
 
-```text
-场景几何和外观是固定的
-变化的只有相机位姿
+读完本章，你应能：
+
+1. 明确指出静态 3DGS 被动态场景打破的是哪条假设（不是投影公式本身）。  
+2. 解释为何“每帧各训一套静态 3DGS”通常不是好答案。  
+3. 写出 `canonical Gaussians + deformation field → Theta(t) → render` 的完整链路。  
+4. 说明为何需要 temporal regularization，并列举典型 failure modes。  
+5. 判断刚体、非刚体、强拓扑变化三类场景下方法边界在哪里。
+
+### 1.2 In scope / Out of scope
+
+| In scope | Out of scope |
+|----------|--------------|
+| 静态假设如何失效 | 某一个具体 4DGS 论文的全部实现细节 |
+| canonical + deformation 范式 | 流体/烟雾专用物理模拟器 |
+| 时间正则与自由度管理 | 完整生产级动态捕获管线 |
+| 与静态 renderer 的关系 | feed-forward 跨场景（第 11 章） |
+
+```mermaid
+flowchart TB
+  subgraph in["本章 In scope"]
+    A["Theta 变成 Theta(t)"]
+    B["canonical + deformation"]
+    C["时间正则与失败模式"]
+    D["每时刻仍用静态 render 链"]
+  end
+  subgraph out["Out of scope"]
+    E["重写体积渲染积分理论"]
+    F["跨场景 feed-forward"]
+  end
 ```
 
-所以第 4 章里，我们才可以一直写：
+### 1.3 问题卡片
+
+| 项 | 内容 |
+|----|------|
+| 输入 | 多时刻多视图图像（视频 + 相机） |
+| 输出 | 可按任意时刻 `t` 查询的动态场景表示，并能渲染新视角 |
+| 旧假设 | `Theta = const`，只有相机变 |
+| 新现实 | 几何/外观也可能随 `t` 变 |
+| 关键约束 | 单帧要像 + 时间要稳 + 参数要可负担 |
+
+---
+
+## 阶段 2 — 拆到基石 [first principles]
+
+### 2.1 质疑常见假设
+
+| 常见假设 | 质疑 | 基石 |
+|---------|------|------|
+| 「动态 = 需要全新 renderer」 | 固定 `t` 后成像与静态相同 | 新问题在 **表示如何随时间生成**，不在 blending 公式 |
+| 「每帧一套 3DGS 最简单也最好」 | 参数 `O(T·N)`，无对应、易闪 | 需要 **跨时间共享结构** |
+| 「让所有参数都随时间自由变最强」 | 过自由 → 闪烁、漂移 | 要做 **自由度管理 [DoF management]** |
+| 「有图像 loss 就够」 | 逐帧可拟合但时间抖 | 需要 **temporal regularization** |
+| 「canonical 必须是第 0 帧」 | 只是参考形态 | canonical 是 **共享基底**，不必等于物理第 0 帧 |
+
+### 2.2 基石列表
+
+**B1 — 静态 3DGS 的隐藏前提是 `Theta` 常数**  
+静态系统写：
 
 ```text
 G_i = {mu_i, Sigma_i, alpha_i, sh_i}
+Theta = {G_i} = const
+I = render(Theta, camera)
 ```
 
-并默认这些量在整个训练和推理过程中是场景常量。
+动态场景打破的是 `Theta = const`，不是 `render(·)` 的骨架。
 
-### 1.1 动态场景里，坏掉的不是投影公式，而是“参数固定”这个前提
+**B2 — 固定时刻上，渲染退化为静态问题**  
+一旦给定 `Theta(t*)`，则：
 
-如果人开始挥手、车开始移动、布开始飘，那么变化的不是相机而已，而是：
+```text
+I(t*) = render(Theta(t*), camera(t*))
+```
 
-- `mu_i` 可能会随时间变化
-- `Sigma_i` 可能会随时间变化
-- `alpha_i` 有时也会变化
-- 外观参数 `sh_i` 在某些场景里也会变
+与第 4 章同构。
 
-所以动态场景真正打破的是：
+**B3 — 跨时间需要共享结构，而非独立表格**  
+视频帧之间存在对应、连续与重复模式。完全独立 `Theta_t` 不强制学习“同一物体如何运动”。
+
+**B4 — 连续时间函数优于离散互不相干参数表（在多数可追踪运动中）**  
+形变场 / 时间条件网络用更少参数表达平滑运动，并支持时间插值。
+
+**B5 — 图像项管“像不像”，时间项管“稳不稳”**  
+只有 `L_photo` 时，系统可以逐帧取巧。`L_temp / L_def / L_local` 把解压回合理轨迹。
+
+**B6 — 表达能力与稳定性是一对张力**  
+放开 `mu(t), Sigma(t), alpha(t), sh(t)` 全能变，拟合短期更强，长期更易抖。工程核心是 **哪些该变、变多少**。
+
+**B7 — 强拓扑变化会碰到表示边界**  
+撕裂、飞溅、烟雾生成/消失，不只是“同一结构移动”，固定 canonical + 平滑变形可能不够。
+
+```text
+                 4DGS 心智模型
+                       ↑
+        Theta(t) + 同构 render + 时间正则
+                       ↑
+   B1 静态假设失效 / B2 瞬时静态 / B3 共享结构
+   B4 连续函数 / B5 像+稳 / B6 DoF / B7 拓扑边界
+```
+
+---
+
+### 加餐怎么读：生活类比 + 失败对照
+
+后面每张概念卡（以及「动态失败模式」大主题）都补了两块「加餐」。阅读建议：
+
+1. **先读 Origin / Core idea**（建立基石）  
+2. **再读生活类比**（用画面记住，但必须能说回基石）  
+3. **最后读失败对照**（知道错会怎样，比只知道对更重要）
+
+技能约束（第一性原理 skill）在这里仍然有效：
+
+> 隐喻可以用，但必须映射回定义与约束；不能只听故事。提线木偶、标准姿势、弹性绳——都只是脚手架；真正要钉住的是 `Theta=const` 失效、`Theta(t)` + 同构 render、时间正则与自由度管理。
+
+一张总导航（类比 → 基石 → 3DGS 症状）：
+
+| 概念 | 一个够用的生活画面 | 基石一句话 | 3DGS 里做错时常见症状 |
+|------|-------------------|------------|------------------------|
+| Static assumption breaks | 静物摄影变成舞台剧 | 坏的是 `Theta` 常数，不是 render 公式 | 鬼影、糊成一条、运动解释不了 |
+| Canonical Gaussians | 标准姿势人体模型 | 共享基底 `Theta^0`，各时刻由它变来 | 每帧独立、身份对不上、插值崩 |
+| Deformation field | 提线/弹性场拉坐标 | `D_φ(x,t)` 产偏移，不是直接画 RGB | MLP 当图像生成器，运动不共享 |
+| Temporal regularization | 电影防抖 + 动作幅度约束 | 图像项管像，时间项管稳 | 逐帧取巧闪烁；过强则动作抹平 |
+| Not a new renderer | 换演员姿势，不换摄影机原理 | 瞬时仍是 project/sort/blend | 重写积分却丢掉实时链 |
+| Failure modes | 舞台事故清单 | 闪/呼吸/过平滑/撕裂机制不同 | 只看单帧 PSNR，视频一播露馅 |
+
+---
+
+## 概念卡合集
+
+### 概念卡 1 — Static Assumption Breaks
+
+| 字段 | 内容 |
+|------|------|
+| **English name** | Breakdown of the static-scene assumption |
+| **中文 [English]** | 静态场景假设失效 [static assumption breaks] |
+| **Origin** | 多视图几何默认场景在采集期间固定 |
+| **Core idea** | 动态时变化的不只是 camera，还有场景状态；`Theta` 必须时间化 |
+| **Why not alternatives** | 假装静止会导致鬼影、模糊、无法解释运动视差 |
+| **In 3DGS** | 直接否定 `mu/Sigma/...` 全局常量 |
+| **PyTorch or pseudocode** | `Theta_t = deform(canonical, t)` |
+| **Common confusions** | 以为坏的是投影公式；其实坏的是参数固定前提 |
+
+#### 生活类比（必须映射回基石）
+
+把 **static assumption breaks** 想成：你原本以为在拍静物棚，实际进了舞台剧现场——演员在走位。坏掉的不是「镜头怎么投影到底片」（render 骨架），而是「场景参数永远固定」这张合同（`Theta = const`）。
+
+| 生活画面 | 对应基石 |
+|----------|----------|
+| 静物合同：东西不许动 | 静态 3DGS：`Theta` 全局常数（B1） |
+| 舞台上人和道具在变 | camera 与场景状态都在变 |
+| 假装没动硬拍一张长曝光 | 鬼影、糊带、错误视差 |
+| 合同改为「每个时刻一份状态」 | `Theta → Theta(t)` |
+
+> 类比到此为止。基石是：动态打破的是参数固定前提，不是投影/blending 数学本身。
+
+#### 失败对照：做对 vs 做错
+
+| 场景 | 做对 | 做错时你看到什么 |
+|------|------|------------------|
+| 诊断失败 | 先问「是否还能假设静止」 | 狂改 projection，其实该时间化 `Theta` |
+| 静态模型硬训动态 | 换 4D 表示或短片段准静态 | 鬼影、四肢糊成扇形 |
+| 多视图动态 | 同步时刻或显式时间戳 | 把不同时刻当同一静态场景 |
+| 心智模型 | `render` 仍在，状态变了 | “4D 要换全新 renderer 课” |
+
+```text
+症状速记：
+  「运动物体拖影/重影」→ 静态假设先被证伪
+  「公式都抄对了仍糊」→ 可能不是公式，是 Theta 不该 const
+```
+
+---
+
+### 概念卡 2 — Canonical Gaussians
+
+| 字段 | 内容 |
+|------|------|
+| **English name** | Canonical Gaussians / canonical space |
+| **中文 [English]** | 规范高斯 / 规范空间 [canonical Gaussians] |
+| **Origin** | 动态重建中的标准姿势/参考空间思想 |
+| **Core idea** | 一套共享的静态基底 `Theta^0`，所有时刻由它变形得到 |
+| **Why not alternatives** | 每帧独立参数无共享身份、更难一致 |
+| **In 3DGS** | `G_i^0=(mu_i^0, Sigma_i^0, alpha_i^0, sh_i^0)` |
+| **PyTorch or pseudocode** | `canonical = ParameterDict(...);` |
+| **Common confusions** | 以为 canonical 必须是 t=0 真实帧；它可以是抽象参考 |
+
+#### 生活类比（必须映射回基石）
+
+**Canonical Gaussians** 像动画里的「标准姿势 T-pose 网格」：角色只有一套共享骨架/蒙皮基底，各帧姿态是基底的变形，而不是每帧重新捏一个互不相干的人偶。
+
+| 生活画面 | 对应基石 |
+|----------|----------|
+| T-pose / 标准体 | `Theta^0` 共享基底 |
+| 各帧姿态 = 基底 + 变形 | `Theta(t) = deform(Theta^0, t)` |
+| 每帧重捏一个角色 | 独立 `Theta_t`：身份对不齐（B3） |
+| 标准姿势不必等于第 0 帧实拍 | canonical 可以是抽象参考 |
+
+> 类比到此为止。基石是：跨时间共享结构，用一套基底承载运动，而不是离散互不相干参数表。
+
+#### 失败对照：做对 vs 做错
+
+| 场景 | 做对 | 做错时你看到什么 |
+|------|------|------------------|
+| 参数量 | 一份 canonical + 紧凑形变 | 每帧一套完整 3DGS，磁盘与时间炸 |
+| 时间插值 | 在 canonical 上插 `t` | 邻帧无对应，中间帧鬼畜 |
+| 身份 | 高斯索引/场在时间上连续 | 高光点每帧换“谁在发光” |
+| 初始化 | 合理选/学 canonical | 强行 t=0 脏帧当唯一真理 |
+
+```text
+症状速记：
+  「单帧还行，视频身份乱跳」→ 缺共享 canonical
+  「无法做慢动作插帧」→ 离散表而非连续时间函数
+```
+
+---
+
+### 概念卡 3 — Deformation Field
+
+| 字段 | 内容 |
+|------|------|
+| **English name** | Deformation field (time-conditioned) |
+| **中文 [English]** | 形变场 / 变形场 [deformation field] |
+| **Origin** | 连续介质/非刚体追踪：用场描述位移 |
+| **Core idea** | `D_phi(x,t)` 给出偏移；`mu(t)=mu^0 + D_phi(mu^0,t)` 等 |
+| **Why not alternatives** | 逐高斯逐帧存表参数爆炸且难插值 |
+| **In 3DGS** | 小网络/哈希场查询每个高斯在 `t` 的 delta |
+| **PyTorch or pseudocode** | `delta = mlp(torch.cat([x, t_embed], -1))` |
+| **Common confusions** | 以为 MLP 直接出整张 RGB；它只生成参数偏移，成像仍靠 renderer |
+
+#### 生活类比（必须映射回基石）
+
+**Deformation field** 像提线木偶上方的控制场：在空间位置 `x` 与时间 `t` 查询「该往哪拉一点」。拉的是坐标/形状参数，不是直接在幕布上画颜色——画颜色仍交给原来的灯光与合成（renderer）。
+
+| 生活画面 | 对应基石 |
+|----------|----------|
+| 提线给出位移 | `D_φ(x,t)` → `Δμ` 等 |
+| `μ(t)=μ⁰+Δ` | 时间条件参数偏移 |
+| 场比每人每帧一本账薄 | 参数紧凑 + 可插值（B4） |
+| 场不负责最终成像公式 | 偏移后仍 `render(Theta(t), cam)` |
+
+> 类比到此为止。基石是：用时间条件场生成参数偏移；成像链同构静态。
+
+#### 失败对照：做对 vs 做错
+
+| 场景 | 做对 | 做错时你看到什么 |
+|------|------|------------------|
+| 网络职责 | MLP/哈希只出 delta | 网络直接回归 RGB，绕开 Gaussian |
+| 最小 4D | 先只放 `μ(t)` | 一上来 μ/Σ/α/SH 全时变，抖成麻 |
+| 自由度 | 按运动类型逐步放开 | 背景也被场全局乱推（呼吸） |
+| 插值 | 任意 `t` 可查询 | 离散表只能整帧跳 |
+
+```text
+症状速记：
+  「场很大但画面不动态」→ 可能学成外观投机而非几何运动
+  「背景一起喘」→ 形变场缺少静止约束/掩码
+```
+
+---
+
+### 概念卡 4 — Temporal Regularization
+
+| 字段 | 内容 |
+|------|------|
+| **English name** | Temporal regularization |
+| **中文 [English]** | 时间正则 [temporal regularization] |
+| **Origin** | 视频稳定性：抑制高频抖动与不合理加速度 |
+| **Core idea** | 惩罚轨迹不平滑、形变过大、邻域结构被撕裂 |
+| **Why not alternatives** | 仅有图像 loss 会“每帧各玩各的” |
+| **In 3DGS** | `L_temp, L_def, L_local` 等与 `L_photo` 加权求和 |
+| **PyTorch or pseudocode** | 见 3.5 节 |
+| **Common confusions** | 正则越大越好；过强会抹掉真实快速运动 |
+
+#### 生活类比（必须映射回基石）
+
+**Temporal regularization** 像拍戏时的「防抖云台 + 动作指导」：每张剧照可以单独修得很美（`L_photo`），但连起来若演员每帧换一张脸、背景墙在呼吸，观众会吐。时间项逼轨迹合理、形变别疯、邻域别撕裂（B5）。
+
+| 生活画面 | 对应基石 |
+|----------|----------|
+| 单帧好看 | 图像项 `L_photo` |
+| 连起来稳 | `L_temp` 等惩罚抖与不合理加速度 |
+| 别把胳膊拉到十米外 | `L_def` 限制形变幅度 |
+| 邻居零件别散架 | `L_local` 邻域结构 |
+| 防抖开到死 | 真·快速动作被抹平（over-smooth） |
+
+> 类比到此为止。基石是：像 + 稳 两套目标；权重是自由度管理的旋钮，不是越大越好。
+
+#### 失败对照：做对 vs 做错
+
+| 场景 | 做对 | 做错时你看到什么 |
+|------|------|------------------|
+| 只有 photo | 加上 temp/def/local 观察视频 | 单帧 PSNR 高，连播闪成迪斯科 |
+| 权重 | 网格搜索 `λ`，看动作保留 | `λ_temp` 拉满 → 挥手变慢动作雕塑 |
+| 诊断 | 看 `‖μ(t)-μ(t-1)‖` 曲线 | 只加正则不加探针 |
+| 快动作场景 | 允许局部更大运动 | 全局同一强正则压死细节 |
+
+```text
+症状速记：
+  「闪」→ 时间项不足或外观自由度过大
+  「动作死」→ 时间项过强或容量不够
+```
+
+---
+
+### 概念卡 5 — Not a New Renderer
+
+| 字段 | 内容 |
+|------|------|
+| **English name** | Same renderer, time-varying parameters |
+| **中文 [English]** | 非新渲染器，而是时间条件参数 [not a new renderer] |
+| **Origin** | 把动态问题分解为“状态生成 + 静态成像” |
+| **Core idea** | 4D 扩展在表示层；瞬时仍用 projection/sort/blend |
+| **Why not alternatives** | 推倒重来成本高，且丢掉 3DGS 实时成像红利 |
+| **In 3DGS** | `render(Theta(t), cam_t)` |
+| **PyTorch or pseudocode** | `img = render(apply_deform(G0, t), cam)` |
+| **Common confusions** | 把 4DGS 理解成全新积分公式课程 |
+
+#### 生活类比（必须映射回基石）
+
+**Not a new renderer** 像：舞台上换的是演员姿势与走位（`Theta(t)`），摄影机光学与冲印流程（projection / sort / tile / blend）仍是同一条。4D 课不是重学一门「动态积分学」，而是学「状态怎么随时间来」。
+
+| 生活画面 | 对应基石 |
+|----------|----------|
+| 瞬时定格仍是静物拍摄 | B2：给定 `t*`，退化为静态 render |
+| 扩展在剧本/表演 | 表示层时间化 |
+| 不换摄影机原理 | 共享第 4/8 章成像与优化杠杆 |
+| 推倒重来拍实验短片 | 丢掉实时链与已有工程 |
+
+> 类比到此为止。基石是：`I(t)=render(Theta(t), cam(t))`；4D 在 `Theta(t)`，不在新 renderer。
+
+#### 失败对照：做对 vs 做错
+
+| 场景 | 做对 | 做错时你看到什么 |
+|------|------|------------------|
+| 实现复用 | 插入 `apply_deform` 再调原 render | 从零重写 blending“因为是 4D” |
+| 推理优化 | 理解 cache 在动态下更脆（第 8 章接口） | 原样抄 sort cache，场景动也命中 |
+| 教学重点 | 盯 canonical + 场 + 正则 | 陷入新公式符号海 |
+| 调试 | 固定 `t` 当静态查 render | 动态 bug 与静态 bug 搅在一起 |
+
+```text
+症状速记：
+  「4D 不会做」→ 先问会不会静态 render + 会不会出 Theta(t)
+  「动态下 cache 乱」→ 不是 renderer 坏了，是连续性假设弱了
+```
+
+---
+
+### 概念卡 6 — Failure Modes of Dynamic Gaussians
+
+| 字段 | 内容 |
+|------|------|
+| **English name** | Dynamic failure modes (flicker, drift, over-smooth, tear) |
+| **中文 [English]** | 动态失败模式 [failure modes] |
+| **Origin** | 自由度与监督不完整时的典型退化 |
+| **Core idea** | 闪烁、背景呼吸、运动被抹平、局部撕裂——各对应不同机制 |
+| **Why not alternatives** | 只看单帧 PSNR 会漏掉时间维故障 |
+| **In 3DGS** | 需同时看视频稳定性与轨迹合理性 |
+| **PyTorch or pseudocode** | 可视化 `\|\|mu(t)-mu(t-1)\|\|` 曲线 |
+| **Common confusions** | 一律加大 `lambda_temp`；可能治好闪却治死动作 |
+
+#### 生活类比（必须映射回基石）
+
+把 **dynamic failure modes** 想成舞台事故清单——同一场戏可以以不同方式演砸，药方不能共用一瓶：
+
+| 事故 | 生活画面 | 机制基石 |
+|------|----------|----------|
+| Flicker 闪烁 | 追光每帧乱跳档 | `sh/α` 过自由、时间正则弱，逐帧取巧 |
+| Background breathe 背景呼吸 | 墙和地板在喘气 | 形变场全局乱推，缺静背景约束 |
+| Over-smooth 过平滑 | 武打被剪成慢瑜伽 | `λ_temp/λ_def` 过大或容量不足 |
+| Tear 撕裂 | 袖子与胳膊分家 | `μ/Σ` 不协调、缺邻域项 |
+
+> 类比到此为止。基石是：时间维故障机制不同；诊断要看视频与轨迹，不只单帧 PSNR。
+
+#### 失败对照：做对 vs 做错
+
+| 场景 | 做对 | 做错时你看到什么 |
+|------|------|------------------|
+| 闪 | 限外观时变 + 加 temp，看邻帧差分 | 盲目加大一切 `λ`，动作一起死 |
+| 呼吸 | 静掩码/更小背景形变 | 全局场更强，“到处都在动更拟合” |
+| 抹平 | 降 `λ` 或增容量/局部权重 | 继续加压正则“求稳” |
+| 撕裂 | 协调 `μ/Σ`、加 local | 只修颜色，结构已散 |
+| 验收 | 单帧 + 视频 + `‖Δμ‖` 图 | 只报平均 PSNR |
+
+```text
+症状速记：
+  「PSNR 好看，成片不能看」→ 时间维故障
+  「一种药治所有」→ 失败模式表没进肌肉记忆
+```
+
+---
+
+## 阶段 3 — 自底向上重建
+
+### 3.1 动态场景到底让哪条假设失效
+
+静态 3DGS 默认：
+
+```text
+场景几何和外观固定
+变化的只有相机位姿
+```
+
+人挥手、车移动、布料飘时：
+
+- `mu_i` 可能随时间变  
+- `Sigma_i` 可能变  
+- `alpha_i` / `sh_i` 有时也变  
+
+所以失效的是：
 
 ```text
 Theta = const
@@ -77,153 +459,102 @@ Theta = const
 而不是：
 
 ```text
-第 4 章的渲染链失效了
+第 4 章渲染链整体作废
 ```
 
-这一点特别重要。
+形式对比：
 
-### 1.2 也就是说，动态场景的新难点不是“怎么渲染”，而是“渲染什么”
+| | 静态 | 动态 |
+|--|------|------|
+| 表示 | `Theta` | `Theta(t)` |
+| 渲染 | `render(Theta, cam)` | `render(Theta(t), cam_t)` |
+| 监督 | 多视图同一时刻 | 多时刻（视频）+ 可选多视图 |
+| 额外难点 | 容量与收敛 | **时间一致性 [temporal consistency]** |
 
-对静态场景，给定相机 `cam_k`，你渲染的是：
-
-```text
-I_pred^k = render(Theta, cam_k)
-```
-
-对动态场景，同一个相机公式仍然可以用，但现在你真正要渲染的是：
-
-```text
-I_pred^t = render(Theta(t), cam_t)
-```
-
-这里最关键的新角色是：
-
-```text
-Theta(t)
-```
-
-也就是：
-
-> 在时刻 `t`，场景里这批 Gaussian 到底处于什么状态。
-
-所以第 10 章要解决的第一个问题不是某条新积分公式，而是：
-
-```text
-怎样定义一个时间相关的 Gaussian 场景表示
+```mermaid
+flowchart LR
+  subgraph static["静态"]
+    T0["Theta 固定"] --> R0["render"] --> I0["I"]
+    C0["camera 变"] --> R0
+  end
+  subgraph dynamic["动态"]
+    Tc["Theta(t)"] --> R1["同一 render 骨架"] --> I1["I(t)"]
+    Ct["camera(t)"] --> R1
+    Def["deformation"] --> Tc
+    Can["canonical"] --> Def
+  end
 ```
 
 ---
 
-## 二、为什么“每帧各训一套静态 3DGS”不是一个好答案
+### 3.2 为什么“每帧各训一套静态 3DGS”不是好答案
 
-最朴素的动态方案听起来很自然：
-
-```text
-视频有多少帧
-我就训练多少套静态 3DGS
-```
-
-设视频共有 `T` 帧，如果第 `t` 帧对应一套独立高斯参数：
+朴素方案：
 
 ```text
-Theta_t = {mu_i^t, Sigma_i^t, alpha_i^t, sh_i^t}_i
+视频 T 帧 → 训练 T 套独立 Theta_t
 ```
 
-那么你当然可以对每一帧分别做：
+#### 问题 1：参数与成本按帧膨胀
 
 ```text
-I_pred^t = render(Theta_t, cam_t)
+成本直觉 ~ O(T * N)
 ```
 
-表面看起来，这似乎已经能覆盖动态情况。
+几百上千帧时，存储与训练都很重。
 
-### 2.1 第一层问题：参数量和训练成本直接按帧数膨胀
+#### 问题 2：没有跨帧对应
 
-如果一帧里有 `N` 个 Gaussian，那么 `T` 帧独立建模就接近：
+第 100 帧的某个高斯与第 101 帧“哪个是同一个结构”，系统没有被迫建立对应。  
+即使每帧都好看，也可能：
 
-```text
-O(T * N)
-```
+- 闪烁 [flickering]  
+- 漂移 [drifting]  
+- 轨迹不物理  
 
-级别的参数和存储成本。
+#### 问题 3：难以时间插值
 
-当视频有几百帧、几千帧时，这会非常重。
+独立表格对“两帧之间的时刻”没有自然定义。
 
-### 2.2 第二层问题：相邻帧完全独立，天然缺时序一致性
-
-更严重的问题不是大，而是不连续。
-
-如果每一帧都各自训练：
-
-- 第 100 帧的一个高斯和第 101 帧的一个高斯，不一定有对应关系
-- 即使两帧画面都拟合得不错，相邻帧的参数也可能跳来跳去
-- 最终容易出现闪烁、漂移和时序不稳定
-
-也就是说：
+结论：
 
 ```text
 逐帧独立拟合
 解决的是“每一帧像不像”
-没有解决“前后帧是不是同一个东西在连续运动”
+没有解决“前后帧是不是同一东西在连续运动”
 ```
 
-### 2.3 这说明动态问题的关键，不是“有多少帧”，而是“帧与帧之间如何共享结构”
-
-这一步很像第 5 章里“为什么不能只靠图像 loss”。
-
-这里也有一个类似的判断：
-
-> 如果每帧都完全独立，系统当然能去拟合画面，但它没有被迫学会“同一套结构在时间中怎样连续变化”。
-
-所以更合理的思路一定是：
+更合理：
 
 ```text
-不是每一帧都从零定义一套新高斯
-而是让很多时刻共享同一个静态基底
-再用某种时间相关机制来描述偏移和变形
+共享一个静态基底
+再用时间机制描述偏移与变形
 ```
-
-这就引出了 canonical space 和 deformation field。
 
 ---
 
-## 三、4DGS 的第一层核心想法：先有一套 canonical Gaussian，再让它随时间变
+### 3.3 Canonical Gaussians + 时间函数
 
-很多 4DGS 方法虽然实现细节不同，但最核心的共同思想常常可以压成下面这句：
-
-> 先定义一套 canonical Gaussian 作为“标准形态”，再用时间条件形变场告诉它在每个时刻该怎样变化。
-
-### 3.1 canonical Gaussian 到底是什么
-
-最常见的写法是先定义一组静态基底：
+#### Canonical 是什么
 
 ```text
 G_i^0 = (mu_i^0, Sigma_i^0, alpha_i^0, sh_i^0)
+Theta^0 = {G_i^0}
 ```
 
-把所有高斯收起来，就是：
+上标 `0` **不一定**是视频第 0 帧，更准确是：
 
 ```text
-Theta^0 = {G_i^0}_i
+参考形态 / canonical space
 ```
 
-这里上标 `0` 不一定真的代表视频第 0 帧。
+可以理解为：
 
-它更准确的含义是：
+- 某一参考时刻的样子  
+- 或更抽象的“标准姿态”  
+- 后续所有时刻都从它变过去  
 
-```text
-一个参考形态 / canonical space
-```
-
-你可以把它理解成：
-
-- 场景在某个参考时刻的样子
-- 或者一个更抽象的“标准姿态”
-- 后续所有时间的场景，都是从它变过去的
-
-### 3.2 最简单的时间相关写法：只让位置随时间变化
-
-一个最小版本的动态参数化可以写成：
+#### 最小动态：只让位置动
 
 ```text
 mu_i(t) = mu_i^0 + Delta_mu_i(t)
@@ -232,27 +563,21 @@ alpha_i(t) = alpha_i^0
 sh_i(t) = sh_i^0
 ```
 
-这相当于在说：
-
-- 先只让高斯中心动起来
-- 形状、透明度和外观先保持不变
-
-这种最小版本虽然不够表达所有动态，但它非常有价值，因为它先回答了一个最核心的问题：
+价值：先回答
 
 ```text
-如果只靠位置形变
-这套静态高斯能不能已经追上大量动态场景的主运动
+若只靠位置形变，能否追上主运动？
 ```
 
-### 3.3 更完整的写法：位置、形状、透明度、外观都可以变成时间函数
+很多刚体/近似刚体场景，这一步已经走很远。
 
-更通用一点，可以写成：
+#### 更完整：更多量变成时间函数
 
 ```text
-Theta(t) = {mu_i(t), Sigma_i(t), alpha_i(t), sh_i(t)}_i
+Theta(t) = {mu_i(t), Sigma_i(t), alpha_i(t), sh_i(t)}
 ```
 
-如果内部参数化采用更稳定的 `scale + rotation + opacity logit` 形式，一个更工程化的版本常常会写成：
+工程参数化示例：
 
 ```text
 s_i(t) = s_i^0 + Delta_s_i(t)
@@ -260,554 +585,303 @@ q_i(t) = normalize(q_i^0 + Delta_q_i(t))
 o_i(t) = o_i^0 + Delta_o_i(t)
 alpha_i(t) = sigmoid(o_i(t))
 sh_i(t) = sh_i^0 + Delta_sh_i(t)
-```
 
-于是协方差再由：
-
-```text
 Sigma_i(t) = R(q_i(t)) * diag(s_i(t)^2) * R(q_i(t))^T
 ```
 
-恢复出来。
+#### 哪些值得变：自由度管理
 
-### 3.4 这里最该记住的，不是所有量都必须变，而是：哪些量值得变，要看场景和稳定性
+| 放开项 | 能力 | 风险 |
+|--------|------|------|
+| 仅 `mu(t)` | 主运动、平移/轨迹 | 褶皱、局部形变不够 |
+| + `Sigma(t)` | 局部拉伸、各向异性变化 | 更易撕裂/闪 |
+| + `alpha(t)` | 显隐、半透明变化 | 闪烁、呼吸 |
+| + `sh(t)` | 外观随时间/视角更复杂 | 极易闪，需强约束 |
 
-很多工程实现不会把所有项都放开，因为：
-
-- 放开越多，自由度越强
-- 但训练也会更难、更不稳
-- 闪烁和漂移更容易出现
-
-所以常见实践往往是：
-
-- 先让 `mu(t)` 变
-- 再视情况决定要不要让 `Sigma(t)` 也变
-- `alpha(t)` 和 `sh(t)` 常常会更谨慎地处理
-
-因为动态系统里，一个很大的工程挑战恰恰是：
+经验路径常常是：
 
 ```text
-自由度越多
-你越容易把短期拟合做漂亮
-但越容易牺牲时间稳定性
+先 mu(t) → 再按需 Sigma(t) → alpha/sh 更谨慎
 ```
 
 ---
 
-## 四、4DGS 并没有推翻第 4 章：每个时刻仍然跑同一条投影与 blending 链
+### 3.4 每个时刻仍然跑同一条投影与 blending 链
 
-这一步是理解 4DGS 的真正桥梁。
-
-很多人会误以为：
-
-```text
-动态高斯 = 一套完全新的渲染理论
-```
-
-其实很多时候并不是。
-
-### 4.1 在每个固定时刻 `t`，你仍然是在做静态渲染
-
-一旦 `Theta(t)` 已经给定，对该时刻的场景来说，你还是可以直接沿用第 4 章：
+给定 `Theta(t)`：
 
 ```text
 mu_cam(t) = R_t * mu(t) + t_t
 Sigma_cam(t) = R_t * Sigma(t) * R_t^T
-```
 
-然后中心投影：
+u(t) = fx * X(t)/Z(t) + cx
+v(t) = fy * Y(t)/Z(t) + cy
 
-```text
-u(t) = fx * X(t) / Z(t) + cx
-v(t) = fy * Y(t) / Z(t) + cy
-```
-
-再做 Jacobian 线性化：
-
-```text
-J_t = [[fx / Z(t), 0, -fx * X(t) / Z(t)^2],
-       [0, fy / Z(t), -fy * Y(t) / Z(t)^2]]
-```
-
-于是：
-
-```text
+J_t = [[fx/Z, 0, -fx*X/Z^2],
+       [0, fy/Z, -fy*Y/Z^2]]
 Sigma_2d(t) ≈ J_t * Sigma_cam(t) * J_t^T
 ```
 
-### 4.2 后面的 blending 也没有消失
-
-对于像素 `p`，你仍然可以写：
+混合：
 
 ```text
 w_i^t(p) = alpha_i(t) * g_i^t(p)
-```
-
-其中：
-
-```text
-g_i^t(p) = exp(-1/2 * (p - mu_2d^i(t))^T * Sigma_2d^i(t)^(-1) * (p - mu_2d^i(t)))
-```
-
-最后照样做 front-to-back compositing：
-
-```text
-T_1^t(p) = 1
 C_t(p) = sum_i T_i^t(p) * w_i^t(p) * c_i^t
-T_{i+1}^t(p) = T_i^t(p) * (1 - w_i^t(p))
+T 递推同静态
 ```
 
-### 4.3 所以 4DGS 最准确的工程理解不是“新渲染器”，而是“时间条件场景参数”
+一句话：
 
-可以把它压成一句话：
+> 第 4 章讲“给定一套 Gaussian 参数怎样出图”；第 10 章讲“动态里这套参数怎样随时间被生成”。
 
-> 第 4 章讲的是“给定一套 Gaussian 参数，怎样出图”；第 10 章讲的是“在动态场景里，这套参数本身怎样随着时间被生成出来”。
-
-这也是为什么第 10 章一定要接在第 4 章之后。
-
-因为动态扩展真正复用的，恰恰是前面已经建立好的静态渲染骨架。
+```mermaid
+flowchart TD
+  C["canonical Theta^0"] --> D["deformation field D_phi(x,t)"]
+  D --> Th["Theta(t)"]
+  Th --> P["project"]
+  Cam["camera(t)"] --> P
+  P --> S["sort + tile"]
+  S --> B["alpha blend"]
+  B --> I["I(t)"]
+```
 
 ---
 
-## 五、时间相关参数到底由什么来产生：变形场为什么会成为主角
+### 3.5 形变场：时间相关参数从哪来
 
-既然核心问题已经压成：
-
-```text
-Theta(t) 如何得到
-```
-
-下一步自然就是：
-
-```text
-Delta_mu_i(t), Delta_s_i(t), Delta_q_i(t) 这些偏移从哪来
-```
-
-这里最自然的思路就是 deformation field。
-
-### 5.1 最常见的抽象：一个时间条件形变场
-
-可以先用最一般的写法表示：
+一般形式：
 
 ```text
 F_phi(x, t) = x + D_phi(x, t)
+mu_i(t) = F_phi(mu_i^0, t) = mu_i^0 + D_phi(mu_i^0, t)
 ```
 
-其中：
+为什么用函数而不是大表格？
 
-- `x` 是 canonical space 里的位置
-- `t` 是时间
-- `D_phi` 是一个由参数 `phi` 控制的偏移场
+- 时间连续性  
+- 局部平滑性  
+- 可插值任意 `t`  
+- 参数量通常远小于 `O(T·N)` 全表  
 
-于是 Gaussian 中心就可以写成：
+为什么常用小网络表达 `D_phi`？  
+因为挥手、布料、表情很难手写解析式。但请记住：
 
-```text
-mu_i(t) = F_phi(mu_i^0, t)
-        = mu_i^0 + D_phi(mu_i^0, t)
+> 网络不是直接输出整张 RGB 图；它只负责告诉高斯“此刻往哪去/怎么变形”。成像仍交给 renderer。
+
+#### PyTorch 示意
+
+```python
+import torch
+import torch.nn as nn
+
+class DeformField(nn.Module):
+    def __init__(self, width=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3 + 1, width), nn.ReLU(inplace=True),
+            nn.Linear(width, width), nn.ReLU(inplace=True),
+            nn.Linear(width, 3),  # delta mu
+        )
+
+    def forward(self, x, t):
+        # x: [N,3], t: scalar or [N,1]
+        if t.ndim == 0:
+            t = t.expand(x.shape[0], 1)
+        elif t.ndim == 1:
+            t = t[:, None]
+        inp = torch.cat([x, t], dim=-1)
+        return self.net(inp)
+
+def theta_at(canonical_mu, deform, t):
+    delta = deform(canonical_mu, t)
+    return canonical_mu + delta
 ```
 
-这条式子特别重要，因为它直接说明：
-
-> 动态场景不一定要为每个高斯、每一帧都单独存一份参数；也可以只学一个连续时间函数，查询时再给出该时刻的偏移。
-
-### 5.2 为什么这个函数形式比“逐帧参数表”更自然
-
-因为视频不是一堆互不相干的图片。
-
-大多数真实运动都具有：
-
-- 时间连续性
-- 局部平滑性
-- 大量重复模式
-
-所以用函数去拟合：
-
-```text
-位置随时间怎样变化
-```
-
-往往比把每一帧硬存成独立查找表更合理。
-
-### 5.3 常见实现里，这个变形场为什么常常由一个小网络来表达
-
-因为 `D_phi(x, t)` 一般很难手工写出解析式。
-
-例如：
-
-- 挥手
-- 布料摆动
-- 脸部表情变化
-
-这些都不是简单的一条直线运动。
-
-所以比较常见的实现会让：
-
-```text
-D_phi(x, t)
-```
-
-由一个时间条件网络来拟合。
-
-但这里一定要记住：
-
-> 这个网络不是最终输出整张图，它只是负责告诉高斯“你此刻应该往哪儿去，或怎样变形”。
-
-真正的成像仍然交给第 4 章那条 renderer。
+可扩展为同时预测 `delta_s, delta_q, ...`，但 DoF 会立刻上升。
 
 ---
 
-## 六、训练目标不再只是“每帧像不像”，还要额外管住时间稳定性
+### 3.6 训练目标：不只是每帧像，还要时间稳
 
-到了这一步，你已经能写出动态场景最基础的 forward：
-
-```text
-Theta(t) -> render(Theta(t), cam_t) -> I_pred^t
-```
-
-于是最直接的图像项当然是：
+#### 图像项（仍继承第 5 章）
 
 ```text
 L_photo = sum_t L_img(render(Theta(t), cam_t), I_gt^t)
+L_img = (1-λ) * L1 + λ * (1-SSIM)
 ```
 
-其中 `L_img` 仍然可以沿用第 5 章：
-
-```text
-L_img = (1 - lambda_dssim) * L1 + lambda_dssim * (1 - SSIM)
-```
-
-### 6.1 但只靠逐帧图像项，动态系统很容易学出“看起来能过、时间上很抖”的结果
-
-这和静态场景的差别就在这里。
-
-静态系统只要回答：
-
-```text
-当前这一张图像对不对
-```
+#### 为什么不够
 
 动态系统还要回答：
 
 ```text
-前后时刻是不是同一个结构在连续变化
+前后时刻是不是同一结构在连续变化
 ```
 
-否则就容易出现：
+否则：
 
-- 相邻帧轻微闪烁
-- 背景被无意义地拉着动
-- 局部区域在时间上抖动
-- 某些高斯为了贴合单帧误差，走出不自然路径
+- 邻帧闪烁  
+- 背景被无意义拉动  
+- 局部抖动  
+- 高斯走出不自然路径以贴单帧误差  
 
-### 6.2 所以时间平滑正则几乎一定会出现
+#### 常见正则
 
-一个最直观的时间平滑项可以写成：
+**时间平滑（二阶差分直觉）**
 
 ```text
-L_temp = sum_{i,t} ||mu_i(t + Delta t) - 2 * mu_i(t) + mu_i(t - Delta t)||^2
+L_temp = sum_{i,t} ||mu_i(t+Δt) - 2 mu_i(t) + mu_i(t-Δt)||^2
 ```
 
-它本质上在惩罚什么？
+惩罚尖锐折点与高频抖。
 
-```text
-二阶时间差分过大
-```
-
-也就是：
-
-> 不要让一条轨迹在时间上突然出现很尖的折点和高频抖动。
-
-### 6.3 光有时间平滑还不够，很多系统还会加 deformation magnitude regularization
-
-因为如果 deformation field 过于自由，它可能会学出“哪里不对就大幅度乱挪”的策略。
-
-所以常见还会加：
+**形变幅度**
 
 ```text
 L_def = sum_{i,t} ||Delta_mu_i(t)||^2
 ```
 
-或者类似项，表达的是：
+“没有必要就别离开 canonical 太远”。
 
-> 如果没有必要，不要离 canonical pose 偏得太远。
-
-### 6.4 还可能会出现局部刚性 / 邻域一致性正则
-
-很多动态物体局部并不是完全自由形变。
-
-例如一只手掌内部、一个人的前臂、车门上的一块金属板，局部关系往往相对稳定。
-
-于是可以引入邻域保持项，例如：
+**局部结构保持**
 
 ```text
-L_local = sum_{(i,j) in N} sum_t ||(mu_i(t) - mu_j(t)) - (mu_i^0 - mu_j^0)||^2
+L_local = sum_{(i,j)∈N} sum_t ||(mu_i(t)-mu_j(t)) - (mu_i^0-mu_j^0)||^2
 ```
 
-它的含义是：
+“邻居相对关系别无故撕裂”。
 
-> 相近高斯之间的相对结构，不要无缘无故被撕裂。
-
-### 6.5 所以动态训练目标更完整地可以写成
+#### 总损失
 
 ```text
-L_total = L_photo + lambda_temp * L_temp + lambda_def * L_def + lambda_local * L_local
+L_total = L_photo
+        + λ_temp * L_temp
+        + λ_def  * L_def
+        + λ_local* L_local
 ```
 
-这里最重要的思想不是具体常数，而是要理解分工：
+分工：
 
-- `L_photo`：保证每一帧图像像
-- `L_temp`：保证时间上不要抖
-- `L_def`：避免形变场乱跑
-- `L_local`：避免局部结构被撕裂或漂散
+| 项 | 管什么 |
+|----|--------|
+| `L_photo` | 每帧像不像 |
+| `L_temp` | 时间抖不抖 |
+| `L_def` | 形变是否乱跑 |
+| `L_local` | 局部是否被撕开 |
 
-也就是说：
+这与第 5 章“图像监督 + 结构规则”一脉相承，只是多了时间结构管理。
 
-> 第 5 章里“图像监督 + 结构规则”的思想，到第 10 章并没有消失，只是多加了一层“时间结构管理”。
+```python
+def temporal_second_diff(mu_seq):
+    # mu_seq: [T, N, 3]
+    return ((mu_seq[2:] - 2 * mu_seq[1:-1] + mu_seq[:-2]) ** 2).mean()
+
+def loss_dynamic(pred_imgs, gt_imgs, mu_seq, delta_mu, lambda_temp, lambda_def):
+    l_photo = (pred_imgs - gt_imgs).abs().mean()  # 简化：真实应含 SSIM 等
+    l_temp = temporal_second_diff(mu_seq)
+    l_def = (delta_mu ** 2).mean()
+    return l_photo + lambda_temp * l_temp + lambda_def * l_def
+```
 
 ---
 
-## 七、为什么 4DGS 的最大工程难点，常常不是 render，而是自由度管理
+### 3.7 最大工程难点常常不是 render，而是自由度管理
 
-到了这里，你可能会觉得：
+#### 太少：欠拟合运动
 
-```text
-那就把所有量都变成时间函数
-表达能力不是最强吗
-```
+只动 `mu`，面对布料褶皱、手指张开、表情细节可能不够。
 
-听起来很合理，但实际工程上很危险。
+#### 太多：过拟合单帧、牺牲时间稳定
 
-### 7.1 自由度太少，会欠拟合运动
+`mu/Sigma/alpha/sh` 全放开 → 单帧贴得很欢，视频像呼吸、闪烁。
 
-如果你只允许：
+#### 正确问题
 
 ```text
-mu(t) 变化
-Sigma, alpha, sh 全固定
+主要矛盾是位置没跟上？
+还是局部形状必须变？
+还是外观变化才是主因？
 ```
 
-那对一些刚体平移或温和运动也许够用。
-
-但一旦碰到：
-
-- 布料褶皱
-- 手指张开
-- 脸部表情
-- 运动模糊明显的结构变化
-
-就容易不够。
-
-### 7.2 自由度太多，又容易学出闪烁和漂移
-
-如果你让：
-
-- `mu(t)` 变
-- `Sigma(t)` 变
-- `alpha(t)` 变
-- `sh(t)` 也大幅度变
-
-那系统就很容易走向另一边：
-
-- 单帧很会贴图
-- 但相邻帧不稳定
-- 某些背景也跟着轻微呼吸
-- 外观看起来像在闪
-
-### 7.3 所以 4DGS 最核心的工程判断，不是“能不能让更多参数动”，而是“哪些参数值得动，动多少才值”
-
-这和第 8 章的推理优化非常像。
-
-都不是盲目堆自由度或技巧，而是：
-
-```text
-先看瓶颈在哪
-再决定放开什么
-```
-
-对动态场景来说，最典型的问题往往是：
-
-- 主要矛盾是位置运动没跟上？
-- 还是局部形状本身也必须变？
-- 还是外观变化（比如镜面、高光、非朗伯）才是主问题？
-
-不同场景的答案会不同。
+不同场景答案不同——这和第 8 章“先找瓶颈再优化”是同一类工程判断。
 
 ---
 
-## 八、几个典型动态场景：同一套 4DGS 思路为什么表现会差很多
+### 3.8 三类场景：同一思路，表现差很多
 
-### 8.1 刚体主导场景：开门、旋转物体、移动车辆
+#### （1）刚体主导：开门、转动物体、车辆平移
 
-这类场景最显著的特点是：
+- 局部相对结构稳  
+- 运动接近 SE(3)  
+- 较少时间 DoF 即可  
 
-- 大部分结构保持刚性
-- 运动模式比较规则
-- `mu(t)` 的变换更像整体 SE(3)
+#### （2）轻度非刚体：挥手、人体关节、面部
 
-这种情况下，动态高斯问题相对“简单”。
+- 可追踪对应仍在  
+- 局部弯折、拉伸  
+- **canonical + 平滑 deformation** 的甜蜜区  
 
-因为你可以用很少的时间自由度，就描述出主要变化。
+#### （3）强拓扑变化：撕纸、液体飞溅、烟雾爆开
 
-### 8.2 轻度非刚体场景：挥手、人体关节运动、面部表情
+问题从“同一结构如何移动”变成“结构分裂/生成/消失”。  
+固定一套 canonical 再平滑变形会碰到表示边界。
 
-这类场景常见特点是：
+> 4DGS 很擅长可连续追踪的动态结构，不一定天然擅长强拓扑变化。
 
-- 大体结构仍然有可追踪对应
-- 局部会弯折、旋转、拉伸
-- 相邻区域运动模式相近但不完全一样
-
-这正是很多 4DGS 方法最擅长的工作区间。
-
-因为：
-
-```text
-canonical space + 局部平滑 deformation field
+```mermaid
+flowchart TD
+  M["运动类型"] --> R["刚体主导：少 DoF"]
+  M --> N["非刚体：deform field 主场"]
+  M --> T["强拓扑：表示边界，需额外机制"]
 ```
-
-对这类运动很自然。
-
-### 8.3 强拓扑变化场景：撕纸、液体飞溅、烟雾爆开
-
-这类场景会变得更难，因为问题不再只是：
-
-```text
-同一个结构怎样移动
-```
-
-而更像：
-
-```text
-结构本身在分裂、生成、消失
-```
-
-这时固定一套 canonical Gaussian 再做连续变形，就会遇到明显边界。
-
-所以你要特别记住：
-
-> 4DGS 很擅长“可连续追踪的动态结构”，但不一定天然擅长强拓扑变化。
-
-这不是某个实现小缺陷，而是表示假设本身的边界。
 
 ---
 
-## 九、动态系统最常见的四种失败模式
+### 3.9 四种常见失败模式（时间维的坏法）
 
-第 7 章讲的是静态训练时的失败模式。
+| 症状 | 常见原因 | 机制一句话 |
+|------|----------|------------|
+| 视频闪 | `sh/alpha` 过自由、时间正则弱 | 逐帧取巧，无稳定轨迹 |
+| 背景呼吸 | 形变场全局乱推、缺静背景约束 | 不该动的也被带动 |
+| 动作被抹平 | `λ_temp/λ_def` 过大、网络容量不足 | 稳定过了头 |
+| 局部撕裂 | `mu/Sigma` 不协调、缺邻域项 | 动了但组织散了 |
 
-到了动态场景，问题会多出一层“时间维度的坏掉方式”。
+诊断时请同时看：
 
-### 9.1 症状一：整体看着能拟合，但视频在闪
-
-常见原因：
-
-- `sh(t)` 或 `alpha(t)` 变化太自由
-- 时间正则太弱
-- 相邻帧监督不够稳定
-
-这类问题本质上是在说：
-
-```text
-系统在逐帧取巧
-却没有学出稳定时间轨迹
-```
-
-### 9.2 症状二：背景也在轻微呼吸或漂动
-
-常见原因：
-
-- deformation field 对全场统一施加位移
-- 缺少静态背景约束
-- canonical 初始化本身就不稳
-
-这说明问题常常不在 renderer，而在：
-
-```text
-形变场把本不该动的高斯也带着一起动了
-```
-
-### 9.3 症状三：运动被学得过于平滑，细节动作丢失
-
-常见原因：
-
-- `lambda_temp` 太大
-- `lambda_def` 太大
-- deformation network 容量不足
-
-这类问题说明：
-
-```text
-系统不是不会稳定
-而是稳定得太狠
-把该保留的动态细节也压平了
-```
-
-### 9.4 症状四：局部结构被撕裂、拉长、断开
-
-常见原因：
-
-- `Sigma(t)` 和 `mu(t)` 更新不协调
-- 缺少邻域一致性约束
-- 运动太复杂，超出当前表示能力
-
-这提醒你：
-
-> 动态 3DGS 的困难不只是“会不会动”，而是“动的时候还能不能维持局部几何组织”。
+- 单帧质量  
+- 邻帧差分可视化  
+- `||Delta_mu||` 空间分布（背景是否不该动却在动）  
+- 轨迹曲线是否高频抖  
 
 ---
 
-## 十、一个最小可运行实验：把 canonical Gaussian 变成随时间运动的 2D 场景
+### 3.10 最小可运行实验：canonical + 时间位移 + 同一 blending
 
-下面这段代码不跑真正的 4DGS，它只做一件特别有价值的事：
-
-> 用一个二维 toy 例子，把“canonical Gaussian + 时间条件位移 + 同一条 blending 渲染链”这条核心直觉画出来。
-
-这段代码里：
-
-- 每个高斯先有一个 canonical 位置 `mu0`
-- 再由一个简单的时间函数产生位移
-- 每个时刻都沿用第 4 章那套 2D footprint + blending
-- 最后同时画出若干时间切片和运动轨迹
+下面用 2D toy 演示核心直觉：**不是换 renderer，而是换输入参数的时间性**。
 
 ```python
 import numpy as np
 import matplotlib.pyplot as plt
-
 
 H, W = 220, 220
 xs = np.linspace(0, W - 1, W)
 ys = np.linspace(0, H - 1, H)
 X, Y = np.meshgrid(xs, ys)
 
-
 canonical_gaussians = [
-    {
-        'mu0': np.array([72.0, 112.0]),
-        'Sigma': np.array([[260.0, 40.0], [40.0, 150.0]]),
-        'alpha': 0.65,
-        'color': np.array([0.95, 0.35, 0.20]),
-        'phase': 0.0,
-    },
-    {
-        'mu0': np.array([118.0, 100.0]),
-        'Sigma': np.array([[220.0, -60.0], [-60.0, 130.0]]),
-        'alpha': 0.62,
-        'color': np.array([0.25, 0.75, 1.00]),
-        'phase': 0.8,
-    },
-    {
-        'mu0': np.array([160.0, 126.0]),
-        'Sigma': np.array([[180.0, 20.0], [20.0, 110.0]]),
-        'alpha': 0.58,
-        'color': np.array([0.96, 0.88, 0.22]),
-        'phase': 1.6,
-    },
+    {"mu0": np.array([72.0, 112.0]), "Sigma": np.array([[260.0, 40.0], [40.0, 150.0]]),
+     "alpha": 0.65, "color": np.array([0.95, 0.35, 0.20]), "phase": 0.0},
+    {"mu0": np.array([118.0, 100.0]), "Sigma": np.array([[220.0, -60.0], [-60.0, 130.0]]),
+     "alpha": 0.62, "color": np.array([0.25, 0.75, 1.00]), "phase": 0.8},
+    {"mu0": np.array([160.0, 126.0]), "Sigma": np.array([[180.0, 20.0], [20.0, 110.0]]),
+     "alpha": 0.58, "color": np.array([0.96, 0.88, 0.22]), "phase": 1.6},
 ]
 
 
 def gaussian_map(mu, Sigma):
     pos = np.stack([X - mu[0], Y - mu[1]], axis=-1)
     inv = np.linalg.inv(Sigma)
-    q = np.einsum('...i,ij,...j->...', pos, inv, pos)
+    q = np.einsum("...i,ij,...j->...", pos, inv, pos)
     return np.exp(-0.5 * q)
 
 
@@ -818,429 +892,330 @@ def deform(mu0, t, phase):
 
 
 def render_frame(t):
-    C = np.zeros((H, W, 3), dtype=np.float64)
-    T = np.ones((H, W, 1), dtype=np.float64)
+    C = np.zeros((H, W, 3))
+    T = np.ones((H, W, 1))
     centers = []
-
     for g in canonical_gaussians:
-        mu_t = deform(g['mu0'], t, g['phase'])
-        footprint = gaussian_map(mu_t, g['Sigma'])[..., None]
-        w = g['alpha'] * footprint
-
-        C += T * w * g['color']
+        mu_t = deform(g["mu0"], t, g["phase"])
+        w = (g["alpha"] * gaussian_map(mu_t, g["Sigma"]))[..., None]
+        C += T * w * g["color"]
         T *= (1.0 - w)
         centers.append(mu_t)
-
-    background = np.ones((H, W, 3), dtype=np.float64)
-    C += T * background
-    return np.clip(C, 0.0, 1.0), np.array(centers)
+    C += T * 1.0
+    return np.clip(C, 0, 1), np.array(centers)
 
 
 times = [0.0, 0.25, 0.5, 0.75]
-trajectory_times = np.linspace(0.0, 1.0, 120)
-
 fig, axes = plt.subplots(2, 4, figsize=(12, 6))
-
 for idx, t in enumerate(times):
     frame, centers = render_frame(t)
     axes[0, idx].imshow(frame)
-    axes[0, idx].scatter(centers[:, 0], centers[:, 1], c='black', s=14)
-    axes[0, idx].set_title(f't = {t:.2f}')
-    axes[0, idx].axis('off')
+    axes[0, idx].scatter(centers[:, 0], centers[:, 1], c="k", s=14)
+    axes[0, idx].set_title(f"t={t:.2f}")
+    axes[0, idx].axis("off")
 
-for g_idx, g in enumerate(canonical_gaussians):
-    traj = np.stack([deform(g['mu0'], t, g['phase']) for t in trajectory_times], axis=0)
-    axes[1, 0].plot(traj[:, 0], traj[:, 1], linewidth=2)
-    axes[1, 0].scatter(g['mu0'][0], g['mu0'][1], s=18)
-
-axes[1, 0].set_xlim(0, W)
-axes[1, 0].set_ylim(H, 0)
-axes[1, 0].set_aspect('equal')
-axes[1, 0].set_title('canonical to trajectory')
-axes[1, 0].set_xlabel('u')
-axes[1, 0].set_ylabel('v')
+traj_t = np.linspace(0, 1, 120)
+for g in canonical_gaussians:
+    traj = np.stack([deform(g["mu0"], t, g["phase"]) for t in traj_t], 0)
+    axes[1, 0].plot(traj[:, 0], traj[:, 1], lw=2)
+    axes[1, 0].scatter(*g["mu0"], s=18)
+axes[1, 0].set_xlim(0, W); axes[1, 0].set_ylim(H, 0); axes[1, 0].set_aspect("equal")
+axes[1, 0].set_title("canonical to trajectory")
 
 for idx, t in enumerate(times[1:], start=1):
-    centers_t = np.stack([deform(g['mu0'], t, g['phase']) for g in canonical_gaussians], axis=0)
-    centers_0 = np.stack([g['mu0'] for g in canonical_gaussians], axis=0)
-    delta = np.linalg.norm(centers_t - centers_0, axis=1)
-    axes[1, idx].bar(np.arange(len(delta)), delta)
-    axes[1, idx].set_title(f'|delta mu| at t={t:.2f}')
-    axes[1, idx].set_xlabel('gaussian id')
-    axes[1, idx].set_ylabel('magnitude')
-
-plt.tight_layout()
-plt.show()
+    d = [np.linalg.norm(deform(g["mu0"], t, g["phase"]) - g["mu0"]) for g in canonical_gaussians]
+    axes[1, idx].bar(range(len(d)), d)
+    axes[1, idx].set_title(f"|delta mu| t={t:.2f}")
+plt.tight_layout(); plt.show()
 ```
 
-你应该观察到：
+你应看到：
 
-- 上排仍然是同一套 blending 逻辑在出图，只是中心位置随时间变化
-- 下排左图把 canonical space 和时间轨迹联系起来了
-- 下排右边几张柱状图展示了不同时间下的形变量大小
+- 上排仍是同一套 blending，只是中心随 `t` 变  
+- 下排把 canonical 与轨迹、形变量连起来  
 
-这段实验最重要的作用不是给你真实视频重建，而是帮你建立一个极其重要的直觉：
+直觉固化：
 
 ```text
-4DGS 不是把 renderer 换掉
+4DGS 不是换掉 renderer
 而是让 renderer 的输入由静态参数变成时间条件参数
 ```
 
 ---
 
+### 3.11 与第 8 章推理优化的接口（动态时 cache 更脆）
+
+静态推理可赌：相机小动 → sort/tile cache。  
+动态时 `Theta(t)` 自己在变：
+
+- 深度顺序更易变  
+- footprint 跨 tile 更频繁  
+- cache 失效更积极  
+
+但基石仍在：仍可 profile 五段时间；只是连续性假设要从“仅相机”扩展到“场景状态”。
+
 ---
 
-## 📝 **本章练习题（动态场景视角）**
+### 3.12 实现顺序建议（建立在第 9 章之上）
 
-### Q1: "动态场景真正打破的是静态 3DGS 的哪一条假设？"
+```text
+1. 静态主链完全可验证
+2. 冻结 renderer，只让 mu(t)=mu0+delta(t) 用已知 toy 运动驱动
+3. 用视频监督学 delta（先小 λ，观察闪）
+4. 逐步加 L_temp / L_def / L_local
+5. 再考虑放开 Sigma(t) 等
+6. 最后才谈动态场景下的加速策略
+```
 
-从时间不变性和几何约束的角度解释。
+切记第 9 章：
+
+> 一次只引入一个复杂度源。动态已经是巨大复杂度。
+
+---
+
+## 阶段 4 — 推广应用 [transfer]
+
+### 4.1 只有单目视频，相机也在动
+
+基石不变：仍需 `Theta(t)` + render。  
+更难点：运动模糊、曝光、位姿与形变耦合（运动归因歧义）。  
+实践上常先尽量稳住相机/位姿估计，再谈形变，否则网络会用错误形变解释相机误差。
+
+### 4.2 多相机同步棚拍
+
+时间对齐更好，多视图抑制歧义。  
+同一套 canonical+deform 往往更稳；仍需时间正则，因为多视图不等于时间平滑自动成立。
+
+### 4.3 只要“某一关键动作片段”可重放
+
+可能不需要完整物理模拟；canonical + 中等容量 deform 足够。  
+若目标是特效级液体，则要承认 B7 边界，寻求专用表示。
+
+### 4.4 动态 + 实时交互
+
+两层延迟：
+
+1. 得到 `Theta(t)`（查 deform）  
+2. `render(Theta(t), cam)`  
+
+第 8 章优化仍作用在第 2 层；第 1 层要控制 deform 网络成本与高斯数量。
+
+```mermaid
+flowchart LR
+  Core["Theta(t)+同构 render"] --> A["单目手持"]
+  Core --> B["多相机棚"]
+  Core --> C["片段重放"]
+  Core --> D["实时交互"]
+```
+
+---
+
+## 阶段 5 — 检验理解 [verification]
+
+### 5.1 费曼摘要
+
+1. 场景一动，坏的是“高斯参数永远固定”，不是“不会投影混合”。  
+2. 每帧各训一套又贵又容易闪，因为没有共享身份与连续运动。  
+3. 更自然的是：先有一套 canonical 高斯，再用形变场问“这一刻该怎么动”。  
+4. 每个时刻仍用原来的渲染流水线出图。  
+5. 只靠每帧图像 loss 会抖；要用时间平滑等正则管轨迹。  
+6. 不是参数动得越多越好；自由度要按场景省着放。  
+7. 撕碎、飞溅这类拓扑大变，可能超出“平滑变形”假设。  
+
+```mermaid
+flowchart TD
+  Can[canonical] --> Def[deform field]
+  Def --> Th[Theta t]
+  Th --> Ren[static render chain]
+  Ren --> Img[image t]
+  Photo[L photo] --> Opt[train]
+  Temp[L temp/def/local] --> Opt
+  Opt --> Def
+  Opt --> Can
+```
+
+### 5.2 自测详解
+
+#### Q1. 动态场景真正打破静态 3DGS 的哪条假设？
 
 <details>
 <summary>提示</summary>
-- 静态 3DGS: $\boldsymbol{\mu}, \boldsymbol{\Sigma}, c, \alpha$ 固定不变
-- 动态场景：这些参数随时间 $t$ 变化
-- 核心假设："同一时刻，几何是固定的"被打破
+`Theta=const` vs 渲染公式。
 </details>
 
 <details>
-<summary>答案</summary>
+<summary>详解</summary>
 
-**静态 3DGS 的核心假设**:
-$$\text{高斯集合} = \{(\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i, c_i, \alpha_i)\}_{i=1}^N = \text{常数（不随时间变化）}$$
+打破的是场景状态固定、`Theta` 为常量的假设。  
+投影、排序、alpha blending 在固定 `t` 上仍然适用。  
+因此 4D 首先是表示时间化问题，不是重写成像积分课。
 
-这意味着：
-- **几何不变性**: 场景结构是静态的
-- **单帧重建**: 所有照片对应同一时刻的场景
-- **优化目标**: 找到一组固定的高斯参数，最小化多视角的重建误差
+</details>
 
-**动态场景打破的假设**:
-1. **时间维度引入**: $\boldsymbol{\mu}_i(t), \boldsymbol{\Sigma}_i(t), c_i(t), \alpha_i(t)$
-2. **连续变化约束**: 相邻时刻的参数应该平滑过渡，不是跳跃式变化
-3. **时序一致性**: 物体运动轨迹应该物理合理（不会瞬间消失/出现）
-
-**数学表达对比**:
-
-| 维度 | 静态 3DGS | 4DGS (动态) |
-|------|----------|------------|
-| **参数** | $\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i$ | $\boldsymbol{\mu}_i(t), \boldsymbol{\Sigma}_i(t)$ |
-| **监督信号** | 多视角照片（同一时刻） | 视频帧序列（多个时刻） |
-| **正则化项** | 尺度约束、透明度约束 | + **时间平滑**: $||\mathbf{x}(t) - \mathbf{x}(t-1)||^2$ |
-
-**关键洞察**: 
-> "4DGS 不是'每个帧各训一套静态 3DGS'"，而是"让同一套结构在时间里连续变化"。
-
----
-
-### Q2: "为什么 canonical Gaussian + deformation field 比'每帧独立训练'更优？"
-
-从参数效率、时序一致性和泛化能力角度分析。
+#### Q2. 为何 canonical + deformation 通常优于每帧独立训练？
 
 <details>
 <summary>提示</summary>
-- 每帧独立：需要 N×T 个高斯，内存爆炸
-- Canonical: 用参考时刻（如 t=0）作为基准，其他时刻通过形变场推导
-- Deformation field: MLP 或参数化函数 $\mathbf{x}(t) = \mathbf{x}_0 + \delta(\mathbf{x}_0, t)$
+参数量、对应、插值、一致性。
 </details>
 
 <details>
-<summary>答案</summary>
+<summary>详解</summary>
 
-**方案对比**:
+独立帧：`O(T·N)`，无强制对应，易闪，难插值。  
+canonical + deform：共享基底 + 连续时间函数，参数更省，天然鼓励连续运动，可查询任意 `t`。  
+代价是要设计场与正则，并处理 DoF。
 
-| 方法 | 参数量 | 时序一致性 | 泛化能力 | 训练难度 |
-|------|--------|-----------|---------|---------|
-| **每帧独立** | $N \times T$ (爆炸) | ❌ 无约束，可能闪烁 | ❌ 无法插值中间帧 | ✅ 简单（每帧独立优化）|
-| **Canonical + Deformation** | $N + M_\text{MLP}$ (线性增长) | ✅ 通过形变场保证连续 | ✅ 可以生成任意时刻 | ⚠️ 需要时序正则化 |
+</details>
 
-**Canonical Gaussian 的定义**:
-$$\text{参考帧 } t_0: \quad \mathcal{G}_0 = \{\boldsymbol{\mu}_{i,0}, \boldsymbol{\Sigma}_{i,0}, c_{i,0}, \alpha_{i,0}\}$$
-
-**Deformation Field 的定义**:
-$$\delta(\mathbf{x}, t) = f_\theta(\mathbf{x}, t) \quad (\text{通常是 MLP})$$
-
-**任意时刻的高斯参数**:
-$$\boldsymbol{\mu}_i(t) = \boldsymbol{\mu}_{i,0} + \delta(\boldsymbol{\mu}_{i,0}, t)$$
-$$\boldsymbol{\Sigma}_i(t) = J_\delta(t) \cdot \boldsymbol{\Sigma}_{i,0} \cdot J_\delta(t)^\top$$
-
-**优势**:
-1. **参数效率**: $N$ 个 canonical + $M$ 个 MLP 权重，而不是 $N \times T$
-2. **时序一致性**: $\lim_{\Delta t \to 0} ||\mathcal{G}(t+\Delta t) - \mathcal{G}(t)|| = 0$（连续）
-3. **插值能力**: 可以生成训练帧之间的中间时刻
-
-**工程实现**:
-```python
-# Canonical Gaussians (固定)
-canonical_gaussians = load_from_sfm()  # N 个高斯
-
-# Deformation MLP (学习)
-def deformation_field(x, t):
-    input = concat(x, t)  # [3+1] dimensions
-    return mlp(input)     # [3] displacement
-
-# Render at time t
-for frame in video:
-    t = frame.time
-    transformed_gaussians = []
-    for g in canonical_gaussians:
-        disp = deformation_field(g.mu, t)
-        g_t = {**g, 'mu': g.mu + disp}  # 更新位置
-        transformed_gaussians.append(g_t)
-    
-    render(transformed_gaussians, frame.camera)
-```
-
----
-
-### Q3: "为什么动态训练不能只靠逐帧图像项，还需要时间平滑和形变正则？"
-
-从优化目标和过拟合角度解释。
+#### Q3. 为何不能只靠逐帧图像项？
 
 <details>
 <summary>提示</summary>
-- 纯图像监督 → 每帧独立优化 → 可能闪烁/抖动
-- 时间平滑：相邻时刻参数应该接近
-- 形变幅度约束：运动不能太极端
+像 vs 稳；逐帧取巧。
 </details>
 
 <details>
-<summary>答案</summary>
+<summary>详解</summary>
 
-**纯图像监督的问题**:
-$$L_\text{img} = \sum_t L_\text{recon}(\mathcal{G}(t), \text{frame}_t)$$
+`L_photo` 只约束“这一帧像”。  
+系统可用不连续参数跳变贴图。  
+`L_temp/L_def/L_local` 分别压抖动、乱形变、邻域撕裂。  
+动态质量必须视频级评价，不能只报单帧 PSNR。
 
-这个 loss 只保证"每一帧看起来像目标"，但**不约束时序关系**。
+</details>
 
-**典型问题**:
-1. **闪烁 (flickering)**: 相邻帧的高斯位置跳跃
-2. **背景呼吸**: 静态区域参数随时间波动
-3. **运动被压平**: 快速运动物体变形失真
-
-**解决方案：添加正则化项**
-
-$$L_\text{total} = L_\text{img} + \lambda_1 L_\text{smooth} + \lambda_2 L_\text{deform} + \dots$$
-
-#### $L_\text{smooth}$: 时间平滑损失
-$$L_\text{smooth}(t) = ||\boldsymbol{\mu}(t) - \boldsymbol{\mu}(t-1)||^2 + ||\delta(t) - \delta(t-1)||^2$$
-
-**作用**: 强制相邻时刻的参数接近，避免抖动。
-
-#### $L_\text{deform}$: 形变幅度约束
-$$L_\text{deform} = ||\delta(\mathbf{x}, t)||^2$$
-
-**作用**: 防止运动过于极端（物理不合理）。
-
-#### $L_\text{structure}$: 局部结构保持
-$$L_\text{structure} = \sum_{i,j \in \text{neighbors}} ||\boldsymbol{\mu}_i(t) - \boldsymbol{\mu}_j(t)||^2 - d_{ij}^2)^2$$
-
-**作用**: 保持相邻高斯之间的相对距离，避免撕裂。
-
-**典型权重配置**:
-```python
-lambda_smooth = 0.1   # 时间平滑
-lambda_deform = 0.01  # 形变幅度约束  
-lambda_structure = 0.05  # 结构保持
-```
-
----
-
-### Q4: "哪些场景更适合 canonical + continuous deformation，哪些会逼近它的边界？"
-
-从运动复杂度和变形模式角度分析。
+#### Q4. “4DGS 不是新 renderer”是什么意思？
 
 <details>
 <summary>提示</summary>
-- 适合：刚体运动、小幅形变（走路的人、车辆行驶）
-- 挑战：大变形（布料飘动）、拓扑变化（物体分裂/合并）
-- 边界情况：非刚性大幅变形场景需要更复杂的模型
+状态生成 vs 成像。
 </details>
 
 <details>
-<summary>答案</summary>
+<summary>详解</summary>
 
-**适合 Canonical + Deformation 的场景**:
+新工作主要在 `Theta → Theta(t)`。  
+`render(Theta(t), cam)` 仍是第 4 章骨架。  
+把 4DGS 说成“全新渲染理论”会误导你去改错层。
 
-| 场景类型 | 示例 | 为什么适合？|
-|---------|------|------------|
-| **刚体运动** | 车辆行驶、机器人移动 | 位移简单，可以用线性/仿射形变近似 |
-| **小幅非刚性** | 人走路（关节弯曲）、动物奔跑 | Deformation field 可以学习局部弯曲 |
-| **摄像机动态** | 手持拍摄的视频 | 相机外参变化 + 静态场景 = 等效于场景运动 |
-
-**逼近边界的情况**:
-
-1. **大变形 (large deformation)**:
-   - 示例：飘动的旗帜、水流、烟雾
-   - 问题：Deformation field 难以表达复杂拓扑变化
-   - 解决方向：**分层表示**（主体 + 细节层）或 **物理仿真耦合**
-
-2. **拓扑变化**:
-   - 示例：物体分裂（玻璃破碎）、合并（液体融合）
-   - 问题：Canonical Gaussian 数量固定，无法动态增删
-   - 解决方向：**4DGS + densification**（在时间维度也允许结构编辑）
-
-3. **非连续运动**:
-   - 示例：瞬间 teleport、瞬移效果
-   - 问题：违反"连续性"假设
-   - 解决方向：**混合表示**（静态部分用 canonical，动态部分独立建模）
-
-**工程建议**:
-- **先尝试简单方案**: 先用 canonical + MLP deformation
-- **监控指标**: 
-  - PSNR/SSIM 是否随帧数增加而下降？→ 可能时序不一致
-  - 形变幅度分布：是否有极端值？→ 需要更强正则化
-  - 视觉检查：相邻帧之间是否有闪烁？
-
-**核心原则**: "模型复杂度应该匹配问题难度" —— 不要过度设计，但也不要低估挑战。
 </details>
 
+#### Q5. 列出至少三种 failure modes 及机制。
+
+<details>
+<summary>提示</summary>
+闪、呼吸、过滑、撕裂。
+</details>
+
+<details>
+<summary>详解</summary>
+
+1. 闪烁：外观/透明度过自由或时间正则不足。  
+2. 背景呼吸：形变场推动静区。  
+3. 动作抹平：时间/形变惩罚过强。  
+4. 撕裂：邻域约束不足或 `mu/Sigma` 不协调。  
+
+对症调 DoF 与 λ，而不是只会加大学习率。
+
+</details>
+
+#### Q6. 强拓扑变化为何困难？
+
+<details>
+<summary>提示</summary>
+连续变形假设 vs 分裂消失。
+</details>
+
+<details>
+<summary>详解</summary>
+
+canonical + 平滑 deform 假设“同一批结构可追踪地变形”。  
+撕裂/飞溅/烟雾涉及生成与消失，身份与拓扑都变。  
+这是表示假设边界，不是调两下 λ 就消失的小 bug。
+
+</details>
+
+#### Q7. 若只能先实现一个最小 4D，你放开什么？
+
+<details>
+<summary>提示</summary>
+mu(t) first。
+</details>
+
+<details>
+<summary>详解</summary>
+
+先只学 `Delta_mu(t)`，冻结 `Sigma/alpha/sh` 为 canonical。  
+验证轨迹与主运动是否追上，再逐步放开。  
+这符合 DoF 管理与第 9 章“一次一个复杂度”。
+
+</details>
+
+#### Q8. 动态场景下第 8 章的 sort cache 还一样香吗？
+
+<details>
+<summary>提示</summary>
+场景状态也在变。
+</details>
+
+<details>
+<summary>详解</summary>
+
+不一定。`Theta(t)` 变化会破坏仅基于小相机运动的连续性假设。  
+cache 需要更严格失效，或仅在“慢动作 + 小时段”使用。  
+renderer 优化思想仍在，但命中率要重新测量。
+
+</details>
+
+### 5.3 基石 ↔ 考点
+
+| 基石 | 考点 |
+|------|------|
+| B1 静态假设 | Q1 |
+| B2 瞬时静态 render | Q4 |
+| B3/B4 共享+连续 | Q2 |
+| B5 时间正则 | Q3 |
+| B6 DoF | Q5/Q7 |
+| B7 拓扑边界 | Q6 |
+
 ---
 
-## 🧠 **4DGS vs 静态 3DGS: 核心差异总结**
+## 一页速览 [one-page sheet]
 
-| 维度 | 3DGS (静态) | 4DGS (动态) |
-|------|-------------|------------|
-| **参数形式** | $\boldsymbol{\mu}, \boldsymbol{\Sigma}, c, \alpha$ (固定) | $\boldsymbol{\mu}(t), \boldsymbol{\Sigma}(t), \dots$ (时间函数) |
-| **监督信号** | 多视角照片（同一时刻） | 视频帧序列（多个时刻） |
-| **正则化** | 尺度、透明度约束 | + 时间平滑、形变幅度、结构保持 |
-| **渲染链** | 单帧：投影 → 排序 → blending | 每帧 $t$: 同左，但参数是 $\mathcal{G}(t)$ |
-| **内存** | ~50-150 MB/M 高斯 | ~100-200 MB (canonical + deformation MLP) |
-| **推理速度** | 60+ fps | 30-60fps (需要实时计算形变场) |
+### 基石
 
-**关键洞察**: 
-> "4DGS = 静态 3DGS 的渲染链 + 时间维度上的参数化 + 时序正则化"。
+- 动态打破 `Theta=const`，不自动推翻 render 链。  
+- 忌每帧独立硬训；要共享结构。  
+- canonical + deformation → `Theta(t)` → 原 renderer。  
+- `L_photo` + 时间/形变/局部正则。  
+- 少即是稳：按场景放开 DoF。  
+- 强拓扑可能越界。  
 
-它不是完全新的方法，而是对 3DGS 的自然扩展！## 十一、为什么很多 4DGS 实现看起来像“形变网络 + 静态渲染器”的拼接
-
-如果你把这章退远一点看，会发现很多 4DGS 系统都像下面这个组合：
+### 总图
 
 ```text
-一个时间条件模块
-+
-一个静态 3DGS renderer
+canonical Gaussians
+        +
+time-conditioned deformation field
+        ↓
+     Theta(t)
+        ↓
+projection → sort → tile → blend  （同静态）
+        ↓
+      image(t)
 ```
 
-这不是偶然，而是非常自然的工程分层。
+### 迁移提示
 
-### 11.1 renderer 负责“给定状态，怎样出图”
+> 先让静态主链正确，再只加“时间状态生成器”；先动 `mu`，再谈其他；用视频稳定性而不是单帧分数验收。
 
-这部分已经在静态场景里被证明有效：
+### 下一章接口
 
-- projection
-- sorting
-- tile culling
-- blending
-
-### 11.2 deformation module 负责“此刻状态是什么”
-
-它不直接生成像素，而是生成：
-
-- `mu(t)`
-- `Sigma(t)`
-- `alpha(t)`
-- `sh(t)`
-
-### 11.3 这种分层为什么值钱
-
-因为它允许你：
-
-- 复用静态 3DGS 的大量实现和优化
-- 单独分析“渲染错了”还是“形变错了”
-- 把动态问题拆成两个可诊断子系统
-
-这和第 9 章强调的实现顺序完全一致。
-
-也就是说，第 10 章并不只是理论升级，也是在告诉你：
-
-> 动态扩展最稳的做法，往往不是从零造一个“全动态黑箱”，而是在静态系统上增加一个时间条件层。
-
----
-
-## 十二、把整章压成一个最短心智模型
-
-如果你只想记一条链，就记这个：
+下一章 [chapter_11_feedforward_gaussian.md](chapter_11_feedforward_gaussian.md) 问：
 
 ```text
-静态 3DGS 的核心假设是：
-场景参数 Theta 固定
-只随相机变化
-
-    ↓
-
-动态场景打破的不是投影和 blending 公式
-而是“参数固定”这个前提
-
-    ↓
-
-所以 4DGS 的关键不是重写渲染器
-而是把 Gaussian 参数改成时间函数：
-Theta(t)
-
-    ↓
-
-最常见思路是：
-先定义 canonical Gaussian 集合 Theta^0
-再用时间条件 deformation field 生成
-mu(t), Sigma(t), alpha(t), sh(t)
-
-    ↓
-
-每个固定时刻 t
-仍然沿用第 4 章那条静态渲染链：
-projection -> sorting -> tile -> blending
-
-    ↓
-
-训练时除了逐帧图像监督
-还要额外加入时间平滑、形变幅度、局部结构保持等约束
-
-    ↓
-
-4DGS 真正解决的是：
-如何让“同一套结构”在时间里连续变化
-而不是把每一帧都当成互不相关的新场景
-```
-
-这就是第 10 章真正想让你建立起来的动态高斯视角。
-
----
-
-## 十三、本章你真正应该能自己重建的几个问题
-
-读完以后，遮住正文，你至少应该能自己回答：
-
-1. 动态场景真正打破的是静态 3DGS 的哪一条假设？
-2. 为什么“每帧各训一套静态 3DGS”既昂贵又缺乏时序一致性？
-3. canonical Gaussian 和 deformation field 分别在系统里承担什么角色？
-4. 为什么很多 4DGS 方法在每个固定时刻仍然沿用第 4 章那条投影与 blending 链？
-5. 为什么动态训练不能只靠逐帧图像项，还需要时间平滑和形变正则？
-6. 为什么让更多参数随时间变化，不一定就等于更好的动态建模？
-7. 哪些场景更适合 canonical + continuous deformation 的假设，哪些场景会逼近它的边界？
-8. 如果视频出现闪烁、背景呼吸、运动被压平、局部结构撕裂，你应该首先怀疑动态系统的哪一层？
-
-如果这些问题你能自己从头讲回来，这一章就真的进入你的脑子了。
-
----
-
-## 十四、下一章接什么
-
-现在你已经知道：
-
-- 静态 3DGS 可以怎样被扩展到动态场景
-- 4DGS 的核心不是重写 renderer，而是让场景参数变成时间函数
-- 为什么 canonical space、deformation field 和时间正则会成为动态系统的主角
-
-下一章 [chapter_11_feedforward_gaussian.md](chapter_11_feedforward_gaussian.md) 会自然接到另一个更大的问题：
-
-> 即使静态 3DGS 和 4DGS 都已经成立，它们大多仍然依赖 per-scene optimization。那如果我们不想每来一个新场景都优化很久，而是想让系统一次前向就直接预测 Gaussian，可能吗？
-
-也就是从：
-
-```text
-“场景会动时，Gaussian 系统该怎样加上时间”
-```
-
-走到：
-
-```text
-“如果连长时间优化都不想做，Gaussian 能不能被直接预测出来”
+为何每个新场景还要优化上万步
+Feed-Forward Gaussian 想摊销的是哪一段成本
+以及集合无序与病态逆问题为何让“直接回归高斯”变难
 ```
